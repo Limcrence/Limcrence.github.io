@@ -1,0 +1,4 @@
+site-src/node_modules/
+site-src/dist/
+site-src/.private/
+*.log

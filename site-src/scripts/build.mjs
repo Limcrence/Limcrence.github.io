@@ -1,0 +1,21 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { build } from 'vite';
+import { fileURLToPath } from 'node:url';
+const root=fileURLToPath(new URL('../',import.meta.url));
+const check=spawnSync(process.execPath,[path.join(root,'node_modules/typescript/bin/tsc'),'--noEmit'],{cwd:root,stdio:'inherit'});if(check.status!==0)process.exit(check.status||1);
+await build({root});
+const files=[];
+async function walk(directory){for(const item of await fs.readdir(directory,{withFileTypes:true})){const full=path.join(directory,item.name);if(item.isDirectory())await walk(full);else files.push(full);}}
+await walk(path.join(root,'dist'));
+const version=createHash('sha256');for(const file of files)version.update(await fs.readFile(file));
+const cache='reading-desk-'+version.digest('hex').slice(0,14);
+const precache=files.filter(file=>!file.endsWith('.nojekyll')).map(file=>'/'+path.relative(path.join(root,'dist'),file).replaceAll('\\','/'));
+precache.push('/reading/');
+await fs.writeFile(path.join(root,'dist/reading/sw.js'),`const CACHE=${JSON.stringify(cache)};const FILES=${JSON.stringify(precache)};
+self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES)).then(()=>self.skipWaiting()));});
+self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('reading-desk-')&&key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim()));});
+self.addEventListener('fetch',event=>{if(event.request.method!=='GET'||new URL(event.request.url).origin!==location.origin)return;event.respondWith(caches.open(CACHE).then(async cache=>{const cached=await cache.match(event.request);if(cached)return cached;const response=await fetch(event.request);if(response.ok)await cache.put(event.request,response.clone());return response;}));});\n`);
+console.log(JSON.stringify({built:true,precache:precache.length,cache}));
