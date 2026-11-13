@@ -16,8 +16,10 @@ export function applyOperation(progress:Progress,op:SaveOperation,now=Date.now()
 }
 export function validateRecords(value:unknown,validIds:Set<string>):ReviewRecord[]{
   if(!Array.isArray(value)||value.length>2000)throw new Error('进度文件格式不正确');
+  const seen=new Set<string>();
   return value.map(item=>{
     if(!item||typeof item!=='object'||!validIds.has(item.questionId))throw new Error('进度包含不属于此题库的题目');
+    if(seen.has(item.questionId))throw new Error('进度中出现重复题目');seen.add(item.questionId);
     if(!['learning','mastered'].includes(item.state)||typeof item.note!=='string'||item.note.length>4000)throw new Error('复习状态或笔记格式不正确');
     for(const field of ['draft','lastAnswer'])if(!Array.isArray(item[field])||item[field].length>10||item[field].some((x:unknown)=>typeof x!=='string'||x.length>256))throw new Error('答案格式不正确');
     if(!['','correct','wrong','partial','revealed'].includes(item.lastResult)||!Number.isSafeInteger(item.attempts)||item.attempts<0||!Number.isFinite(item.updatedAt)||item.updatedAt<0)throw new Error('复习记录格式不正确');

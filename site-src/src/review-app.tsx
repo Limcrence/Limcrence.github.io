@@ -6,6 +6,10 @@ import { BookOpen, ArrowLeft, ArrowRight, Check, Search, MoreHorizontal, Downloa
 import { applyOperation, freshRecord, mergeProgress, passagePart, PROGRESS_KEY, validateRecords } from "./lib/progress";
 import { displayNumber, gradeAnswer, originalAnswer, shortSource } from "./lib/grading";
 import type { Article, Library, Origin, Progress, Question, ReviewRecord, SaveOperation } from "./lib/types";
+import {CloudSync} from './cloud-sync';
+import type {SyncIdentity} from './lib/sync-crypto';
+import type {SyncEngine} from './lib/sync-engine';
+import {makeSnapshot,validateSnapshot,type ProgressSnapshot,type ReadingSession} from './lib/snapshot';
 
 let library:Library;
 let questions:Question[]=[];
@@ -46,7 +50,7 @@ function QuestionText({text}:{text:string}) {
   return <>{text.split(/(\[本题____\])/).map((part,i)=>part==="[本题____]"?<span className="target-blank" key={i}>本题空格</span>:<span key={i}>{part}</span>)}</>;
 }
 
-export default function ReviewApp({lock}:{lock:()=>void}){
+export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentity:SyncIdentity}){
   const [progress,setProgress]=useState<Progress>({});
   const [ready,setReady]=useState(false);
   const [saveError,setSaveError]=useState(false);
@@ -63,12 +67,24 @@ export default function ReviewApp({lock}:{lock:()=>void}){
   const [fontSize,setFontSize]=useState(17);
   const [toast,setToast]=useState("");
   const progressRef=useRef<Progress>({});
+  const positionRef=useRef<ReadingSession|null>(null);
+  const engineRef=useRef<SyncEngine|null>(null);
   const toolsRef=useRef<HTMLDetailsElement>(null);
   const importRef=useRef<HTMLInputElement>(null);
-  const persist=useCallback((next:Progress)=>{
+  const persist=useCallback((next:Progress,notify=true)=>{
     progressRef.current=next;setProgress(next);
     try{localStorage.setItem(PROGRESS_KEY,JSON.stringify({format:'reading-desk-progress-v1',records:Object.values(next)}));setSaveError(false);}catch{setSaveError(true);}
+    if(notify)engineRef.current?.localChanged();
   },[]);
+  const getSnapshot=useCallback(()=>makeSnapshot(progressRef.current,positionRef.current),[]);
+  const applyCloud=useCallback((value:ProgressSnapshot)=>{
+    // Save first; a failed local write must not acknowledge a cloud replacement.
+    localStorage.setItem(PROGRESS_KEY,JSON.stringify({format:'reading-desk-progress-v1',records:value.records}));
+    localStorage.setItem('reading-desk-session',JSON.stringify(value.session));
+    positionRef.current=value.session;persist(Object.fromEntries(value.records.map(r=>[r.questionId,r])),false);setLastSession(value.session);setSession(value.session);
+    if(!value.session)history.replaceState(null,'',location.pathname);
+  },[persist]);
+  const validateCloud=useCallback((value:unknown)=>validateSnapshot(value,new Set(byId.keys())),[]);
   useEffect(()=>{
     try{
       const saved=localStorage.getItem(PROGRESS_KEY);
@@ -77,7 +93,7 @@ export default function ReviewApp({lock}:{lock:()=>void}){
     setReady(true);
     try{
       const last=JSON.parse(localStorage.getItem("reading-desk-session")||"null");
-      if(last?.ids?.length&&last.ids.every((id:string)=>byId.has(id))&&last.index>=0&&last.index<last.ids.length)setLastSession(last);
+      if(last?.ids?.length&&last.ids.every((id:string)=>byId.has(id))&&last.index>=0&&last.index<last.ids.length){setLastSession(last);positionRef.current=last;}
       const size=Number(localStorage.getItem("reading-desk-font"));if(size>=15&&size<=22)setFontSize(size);
       const id=new URLSearchParams(location.hash.slice(1)).get("q");const q=id?byId.get(id):null;
       if(q){
@@ -85,12 +101,12 @@ export default function ReviewApp({lock}:{lock:()=>void}){
         else{const group=questions.filter(x=>x.exercise_id===q.exercise_id&&(originalWrong(q)?originalWrong(x):q.status==="未作答"?x.status==="未作答":true));setSession({ids:group.map(x=>x.id),index:group.findIndex(x=>x.id===q.id)});}
       }
     }catch{}
-    const onStorage=(e:StorageEvent)=>{if(e.key!==PROGRESS_KEY||!e.newValue)return;try{const records=validateRecords(JSON.parse(e.newValue).records,new Set(byId.keys()));const next=mergeProgress(progressRef.current,records);progressRef.current=next;setProgress(next);}catch{}};
+    const onStorage=(e:StorageEvent)=>{if(e.key!==PROGRESS_KEY||!e.newValue)return;try{const records=validateRecords(JSON.parse(e.newValue).records,new Set(byId.keys()));progressRef.current=Object.fromEntries(records.map(r=>[r.questionId,r]));setProgress(progressRef.current);engineRef.current?.localChanged();}catch{}};
     window.addEventListener('storage',onStorage);return()=>window.removeEventListener('storage',onStorage);
   },[]);
   useEffect(()=>{
     if(!session)return;
-    try{localStorage.setItem("reading-desk-session",JSON.stringify(session));setLastSession(session);history.replaceState(null,"",`#q=${encodeURIComponent(session.ids[session.index])}`);}catch{}
+    try{localStorage.setItem("reading-desk-session",JSON.stringify(session));positionRef.current=session;setLastSession(session);history.replaceState(null,"",`#q=${encodeURIComponent(session.ids[session.index])}`);engineRef.current?.localChanged();}catch{}
   },[session]);
   useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(""),3500);return()=>clearTimeout(timer);},[toast]);
   const update=useCallback((op:SaveOperation,_debounced=false)=>{if(loadError){setToast('原进度未能读取，请先导出备份或导入有效进度');return;}persist(applyOperation(progressRef.current,op));},[persist,loadError]);
@@ -142,7 +158,7 @@ export default function ReviewApp({lock}:{lock:()=>void}){
     <header className="app-header">
       <button className="brand" onClick={back} aria-label="返回练习库"><span className="brand-icon"><BookOpen size={21} strokeWidth={1.7}/></span><span>阅读错题本<small>READING DESK</small></span></button>
       <div className="header-middle">{session?<button className="back-link" onClick={back}><ArrowLeft size={16}/>练习库</button>:<span>原文、题目和解析，一起复习</span>}</div>
-      <div className="header-actions">{syncStatus}<details className="tools-menu" ref={toolsRef}><summary className="icon-button" aria-label="更多操作"><MoreHorizontal size={21}/></summary><div className="dropdown"><a href="/">返回个人空间</a><button onClick={lock}><LockKeyhole size={16}/>锁定复习空间</button><p>换设备复习时，先导出再导入。<br/>不同设备不会自动同步。</p><button onClick={exportBackup} disabled={!ready}><Download size={16}/>导出复习进度</button><button onClick={()=>{importRef.current?.click();toolsRef.current?.removeAttribute("open");}} disabled={!ready}><Upload size={16}/>导入复习进度</button></div></details><input ref={importRef} type="file" accept=".json,application/json" className="visually-hidden" onChange={e=>{if(e.target.files?.[0])void importBackup(e.target.files[0]);e.target.value="";}}/></div>
+      <div className="header-actions">{syncStatus}<CloudSync identity={syncIdentity} ready={ready&&!loadError} engineRef={engineRef} getSnapshot={getSnapshot} applySnapshot={applyCloud} validate={validateCloud}/><details className="tools-menu" ref={toolsRef}><summary className="icon-button" aria-label="更多操作"><MoreHorizontal size={21}/></summary><div className="dropdown"><a href="/">返回个人空间</a><button onClick={lock}><LockKeyhole size={16}/>锁定复习空间</button><p>点右上角“云端同步”，选好版本后自动保存到云端。导出文件也可作为独立备份。</p><button onClick={exportBackup} disabled={!ready}><Download size={16}/>导出复习进度</button><button onClick={()=>{importRef.current?.click();toolsRef.current?.removeAttribute("open");}} disabled={!ready}><Upload size={16}/>导入复习进度</button></div></details><input ref={importRef} type="file" accept=".json,application/json" className="visually-hidden" onChange={e=>{if(e.target.files?.[0])void importBackup(e.target.files[0]);e.target.value="";}}/></div>
     </header>
 
     {session?<Practice markRemainder={markRemainder} key={session.ids.join(",")} session={session} setSession={setSession} progress={progress} update={update} fontSize={fontSize} changeFont={n=>{setFontSize(n);try{localStorage.setItem("reading-desk-font",String(n));}catch{}}} back={back} ready={ready}/>:<div className="library-layout">

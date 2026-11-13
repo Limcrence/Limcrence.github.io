@@ -1,0 +1,8 @@
+{
+  "name":"limcrence-reading-sync",
+  "main":"worker.mjs",
+  "compatibility_date":"2026-05-22",
+  "workers_dev":true,
+  "d1_databases":[{"binding":"DB","database_name":"limcrence-reading-progress","database_id":"REPLACE_WITH_DATABASE_ID"}],
+  "vars":{"ALLOWED_ORIGIN":"https://limcrence.github.io","VAULT_ID":"REPLACE_WITH_SHA256_OF_DERIVED_AUTH_TOKEN"}
+}

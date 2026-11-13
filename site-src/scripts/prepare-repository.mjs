@@ -8,6 +8,7 @@ async function walk(directory,prefix){for(const entry of await fs.readdir(direct
 await walk(path.join(root,'dist'),'');
 for(const directory of ['src','reading','public','scripts'])await walk(path.join(root,directory),'site-src/'+directory+'/');
 for(const file of ['index.html','package.json','tsconfig.json','vite.config.ts','.gitignore'])await add(path.join(root,file),'site-src/'+file);
+for(const file of ['worker.mjs','schema.sql','.gitignore','README.md','wrangler.example.jsonc'])await add(path.join(root,'../cloud-sync',file),'cloud-sync/'+file);
 await add(path.join(root,'README.md'),'README.md');
 elements.push({path:'.gitignore',mode:'100644',type:'blob',content:'site-src/node_modules/\nsite-src/dist/\nsite-src/.private/\n*.log\n'});
 const password=(await fs.readFile(path.join(root,'.private/access-key.txt'),'utf8')).trim();
