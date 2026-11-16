@@ -4,12 +4,13 @@ GitHub Pages 首页是个人工具入口，`/reading/` 是雅思阅读复习工�
 
 ## 阅读复习
 
-- 首页默认为“今日计划”，每天按 30 分钟预算安排到期复习和首次精读，可调整为 20 / 45 分钟。题目按需要选取，同篇合并，P1 / P2 / P3 按周内时间覆盖平衡，明确的同题不会重复排入。
+- 导航统一为“今日”和“选题”。“今日”只保留一个开始 / 继续入口，每天按 30 分钟预算安排到期复习和首次精读，可调整为 20 / 45 分钟；任务清单和计划说明按需展开。“选题”直接点击文章进入，不再提供重复的总开始按钮。
 - 普通错题在提交前先给相关段落，关键句和解析在提交后展开；细节段落匹配先隐藏目标段号，Heading / Summary 等题组统一收集答案后反馈。使用关键句或目标段号学习的匹配题不会计作独立成功。
 - 复习间隔使用固定版本的开源 ts-fsrs 5.2.3 / FSRS-6，初始采用通用参数。答错、看答案或只记住答案会更早安排；同日重做只作学习检查，不扩大长期稳定度。这不保证实际阅读理解的正确率。
 - 每日计划、提交但尚未复盘的题组答案、复习日期、反馈、学习时区一起保存和加密同步。刷新后仍继续同一份计划，跳过不算答错，历史错题不会全部初始化为逾期。
 - 原文与题目并排，手机可在两者之间切换。
-- 按来源、题型、P1 / P2 / P3、原作答情况筛选，继续上次练习。
+- 按来源、题型、P1 / P2 / P3、原作答情况筛选。返回后保留筛选和列表位置，同一篇可从未完成位置继续；整轮结束后清除继续入口。
+- 做题页只保留一个底部操作栏。提交后自动滚动到结果和依据，正确答案优先简写；理解评价集中为“没读懂 / 不太稳 / 懂了”。同义替换、解析、笔记和原作答记录均可按需展开。
 - 提交后核对答案、原文定位、同义替换和 AI 解析。
 - 逐题区分认真作答与赶时间蒙答，也可从某题起标记到篇末。历史判分不变。
 - 点击右上角“云端同步”，比较本地与云端存档并选择保留哪一份。选定后，两边保存同一份进度，后续笔记、掌握状态、答题记录、蒙答标记及练习位置自动同步。
@@ -31,6 +32,6 @@ GitHub Pages 首页是个人工具入口，`/reading/` 是雅思阅读复习工�
 
 需要 Node.js 22.13+。安装 `package.json` 依赖后运行 `node scripts/build.mjs`，把 `dist/` 部署到 GitHub Pages。加密题库已经准备好，普通页面更新不需要原始数据。持有原始题库时可运行 `scripts/encrypt-library.mjs` 重新生成；访问口令保存在被忽略的 `.private/` 中。完整数据验证脚本仅能在持有本地口令时运行。
 
-UI 使用 React、Lucide 和 react-resizable-panels；分栏阅读交互参考 [IELTS Practice](https://github.com/sallowayma-git/IELTS-practice)。
+UI 使用 React、Lucide 和原生 CSS 双栏；手机在原文与题目之间切换。分栏阅读交互参考 [IELTS Practice](https://github.com/sallowayma-git/IELTS-practice)。
 
 验证命令：`node --experimental-strip-types scripts/check.mjs`、`node --experimental-strip-types scripts/check-study.mjs`、`node --experimental-strip-types scripts/check-sync.mjs`、`node --import tsx scripts/check-ui.tsx`。最后一项是内存 DOM 交互测试，不代表实际浏览器或手机排版已被验证。

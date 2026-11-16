@@ -31,6 +31,18 @@ function Gate(){
   useEffect(()=>{const saved=rememberedKey();if(saved)void unlock('',saved);},[]);
   useEffect(()=>{if(import.meta.env.PROD&&'serviceWorker'in navigator)void navigator.serviceWorker.register('/reading/sw.js',{scope:'/reading/'}).catch(()=>{});},[]);
   if(unlocked&&syncIdentity)return <ReviewApp syncIdentity={syncIdentity} lock={()=>{localStorage.removeItem(REMEMBER_KEY);setUnlocked(false);setSyncIdentity(null);}}/>;
-  return <main className="unlock-page"><a className="unlock-back" href="/"><ArrowLeft size={15}/>个人空间</a><div className="unlock-card"><span className="unlock-icon"><BookOpen size={28} strokeWidth={1.4}/></span><p className="eyebrow">YOUR PRIVATE READING DESK</p><h1>回来，接着学。</h1><p className="unlock-intro">输入访问口令，打开你的阅读复习空间。</p><form onSubmit={e=>{e.preventDefault();void unlock(password);}}><label htmlFor="access-password">访问口令<span><LockKeyhole size={12}/>题库已加密</span></label><input id="access-password" type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password" autoCapitalize="none" spellCheck={false} required disabled={busy} placeholder="输入口令"/><label className="remember-unlock"><input type="checkbox" checked={remember} onChange={e=>setRemember(e.target.checked)} disabled={busy}/>在这台设备保持解锁</label>{error&&<p className="unlock-error" role="alert">{error}</p>}<button type="submit" className="button primary" disabled={busy||!password}>{busy?<><LoaderCircle className="spin" size={17}/>正在解锁</>:<>进入复习<ArrowRight size={17}/></>}</button></form><p className="unlock-note">换设备后，点“云端同步”选择要保留的存档。选定后，后续进度自动同步。</p></div><footer className="unlock-footer">Limcrence · 阅读复习</footer></main>;
+  return <main className="unlock-page">
+    <a className="unlock-back" href="/"><ArrowLeft size={15}/>个人空间</a>
+    <div className="unlock-card"><span className="unlock-icon"><BookOpen size={27} strokeWidth={1.4}/></span><h1>解锁阅读空间</h1>
+      <form onSubmit={e=>{e.preventDefault();void unlock(password);}}>
+        <label htmlFor="access-password">访问口令</label>
+        <input id="access-password" type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete="current-password" autoCapitalize="none" spellCheck={false} required disabled={busy} placeholder="输入口令"/>
+        <label className="remember-unlock"><input type="checkbox" checked={remember} onChange={e=>setRemember(e.target.checked)} disabled={busy}/>在这台设备保持解锁</label>
+        {error&&<p className="unlock-error" role="alert">{error}</p>}
+        <button type="submit" className="button primary" disabled={busy||!password}>{busy?<><LoaderCircle className="spin" size={17}/>正在解锁</>:<>解锁<ArrowRight size={17}/></>}</button>
+      </form>
+    </div>
+    <footer className="unlock-footer">Limcrence</footer>
+  </main>;
 }
 createRoot(document.getElementById('root')!).render(<Gate/>);
