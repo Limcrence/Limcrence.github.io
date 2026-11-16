@@ -127,6 +127,9 @@ mark { padding: 2px 0; background: #e4ecbf; color: inherit; box-decoration-break
 .answer-options:disabled .answer-option { cursor: default; }
 .compact-options { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); }
 .compact-options .answer-option { padding: 11px; gap: 9px; font-size: 12px; }
+.judgment-options { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.judgment-options .answer-option { justify-content: center; text-align: center; }
+.judgment-options .option-letter { display: none; }
 .fill-answer { display: block; margin: 20px 0; }
 .fill-answer input { width: 100%; min-height: 47px; padding: 11px 14px; border: 1px solid #d8e2cc; background: #fff; color: #3d5832; font-size: 16px; }
 .fill-answer input:disabled { background: #f8faf5; opacity: 1; }
@@ -258,6 +261,7 @@ dialog::backdrop { background: #31412b38; backdrop-filter: blur(3px); }
   .answer-footer .primary { min-width: 102px; }
   .rating-actions .button.primary { min-width: 0; }
   .compact-options { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .judgment-options { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .sync-dialog { width: calc(100% - 22px); border-radius: 11px; }
   .sync-heading { padding: 22px 19px 19px; }
   .sync-heading h2 { font-size: 21px; }

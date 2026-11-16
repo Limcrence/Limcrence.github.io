@@ -33,11 +33,12 @@ export function Practice({library,session,setSession,progress,update,fontSize,ch
   const answered=(item:Question)=>{const draft=progress[item.id]?.draft||[];return Object.keys(item.options).length?draft.length>0:!!draft[0]?.trim();};
   const groupMissing=groupPending.filter(x=>!answered(x));
   const answer=record.draft,hasOptions=Object.keys(q.options).length>0,multi=hasOptions&&q.points>1,hasAnswer=answered(q);
+  const compactOptions=paragraphMatch||/Summary选词|人名|判断/.test(q.question_type)&&Object.values(q.options).every(label=>label.length<=32);
   const result=feedback?gradeAnswer(q,feedback.answer):null;
   const correctLabel=hasOptions?q.correct_answer_raw.map(key=>{const label=q.options[key]||'';return /判断/.test(q.question_type)?label||key:label&&label.length<=32?`${key} · ${label}`:key;}).join('、'):q.correct_answer;
   function scrollToLabel(label=labels[0]){const index=article.paragraphs.findIndex(p=>p.label===label);if(index>=0)requestAnimationFrame(()=>passageRef.current?.querySelector(`[data-paragraph-index="${index}"]`)?.scrollIntoView({behavior:'smooth',block:'center'}));}
   function locate(label?:string){setMobilePane('passage');scrollToLabel(label);}
-  useEffect(()=>{setContext(/Summary|表格/.test(q.question_type));questionRef.current?.scrollTo({top:0});if(labels.length&&scopeVisible)scrollToLabel();else passageRef.current?.scrollTo({top:0});},[q.id]);
+  useEffect(()=>{setContext(false);questionRef.current?.scrollTo({top:0});if(labels.length&&scopeVisible)scrollToLabel();else passageRef.current?.scrollTo({top:0});},[q.id]);
   useEffect(()=>{if(queueOpen&&!queueRef.current?.open)queueRef.current?.showModal();if(!queueOpen&&queueRef.current?.open)queueRef.current?.close();},[queueOpen]);
   function move(offset=1,finished=false,skipped=false){
     if(session.kind==='daily'&&offset>0){const excluded=new Set([...(dailyPlan?.completed||[]),...(dailyPlan?.skipped||[]),...(finished||skipped?[q.id]:[])]);const after=session.ids.findIndex((id,i)=>i>session.index&&!excluded.has(id));const earlier=session.ids.findIndex(id=>!excluded.has(id)&&id!==q.id);const next=after>=0?after:earlier;if(next<0){back(true);return;}setSession({...session,index:next});}
@@ -81,7 +82,7 @@ export function Practice({library,session,setSession,progress,update,fontSize,ch
         <h2 className="question-text"><Text text={q.question}/></h2>
         {q.full_context&&<><button type="button" className="context-toggle" onClick={()=>setContext(!context)}><FileText size={14}/>{context?'收起题组':'展开题组'}</button>{context&&<div className="full-context"><p>{q.full_context}</p><details><summary>全部小题</summary>{groupQuestions.map(item=><p key={item.id}><strong>{displayNumber(item)}. </strong>{item.question}</p>)}</details></div>}</>}
         {!!q.image_urls.length&&<div className="question-images">{q.image_urls.filter(url=>/^https:\/\//.test(url)).map((url,i)=><img key={url} src={url} alt={`原题图示 ${i+1}`} loading="lazy"/>)}</div>}
-        {hasOptions?<fieldset className={`answer-options ${paragraphMatch?'compact-options':''}`} disabled={shown||!ready}><legend className="visually-hidden">{multi?`选择 ${q.points} 项`:'选择答案'}</legend>{Object.entries(q.options).map(([key,label])=>{
+        {hasOptions?<fieldset className={`answer-options ${compactOptions?'compact-options':''} ${/判断/.test(q.question_type)?'judgment-options':''}`} disabled={shown||!ready}><legend className="visually-hidden">{multi?`选择 ${q.points} 项`:'选择答案'}</legend>{Object.entries(q.options).map(([key,label])=>{
           const selected=answer.includes(key),correct=shown&&q.correct_answer_raw.includes(key),incorrect=shown&&selected&&!correct;
           return <label className={`answer-option ${selected?'selected':''} ${correct?'correct-option':''} ${incorrect?'wrong-option':''}`} key={key}><input type={multi?'checkbox':'radio'} name={`answer-${q.id}`} checked={selected} onChange={()=>choose(key)}/><span className="option-letter">{key}</span><span className="option-text">{label||`Paragraph ${key}`}</span>{correct&&<Check size={16}/>}</label>;
         })}</fieldset>:<label className="fill-answer"><span className="visually-hidden">你的答案</span><input aria-label="填写你的答案" autoComplete="off" spellCheck={false} placeholder="输入答案" value={answer[0]||''} maxLength={256} disabled={shown||!ready} onChange={e=>update({questionId:q.id,op:'draft',value:[e.target.value]})}/></label>}
