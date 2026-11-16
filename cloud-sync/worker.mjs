@@ -14,8 +14,9 @@ async function handle(request,env){
     const reply=(value,status=200)=>new Response(value===null?null:JSON.stringify(value),{status,headers});
     if(origin&&!allowed)return reply({error:'origin_not_allowed'},403);
     if(request.method==='OPTIONS')return new Response(null,{status:204,headers});
-    const url=new URL(request.url),match=url.pathname.match(/^\/v1\/vault\/([a-f0-9]{64})$/);
-    if(!match||match[1]!==env.VAULT_ID)return reply({error:'not_found'},404);
+    const url=new URL(request.url),match=url.pathname.match(/^\/v([12])\/vault\/([a-f0-9]{64})$/);
+    if(!match||match[2]!==env.VAULT_ID)return reply({error:'not_found'},404);
+    const clientVersion=Number(match[1]);
     const token=request.headers.get('Authorization')?.match(/^Bearer ([A-Za-z0-9_-]{43})$/)?.[1];
     if(!token)return reply({error:'unauthorized'},401);
     const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))),b=>b.toString(16).padStart(2,'0')).join('');
@@ -24,6 +25,7 @@ async function handle(request,env){
     try{
       if(request.method==='GET'){
         const row=await db.prepare('SELECT revision, updated_at, mutation_id, payload FROM progress_vaults WHERE vault_id = ?').bind(env.VAULT_ID).first();
+        if(row&&clientVersion<(JSON.parse(row.payload).minClientVersion||1))return reply({error:'client_upgrade_required'},426);
         return reply({record:row?{version:row.revision,updatedAt:row.updated_at,mutationId:row.mutation_id,payload:JSON.parse(row.payload)}:null});
       }
       if(request.method!=='PUT')return reply({error:'method_not_allowed'},405);
@@ -32,9 +34,10 @@ async function handle(request,env){
       let body;try{body=JSON.parse(raw);}catch{return reply({error:'invalid_json'},400);}
       const p=body.payload;
       if((body.expectedVersion!==null&&(!Number.isSafeInteger(body.expectedVersion)||body.expectedVersion<1))||typeof body.mutationId!=='string'||!/^[0-9a-f-]{36}$/i.test(body.mutationId)||p?.format!=='reading-progress-aesgcm-v1'||typeof p.iv!=='string'||!/^[A-Za-z0-9+/]{16}$/.test(p.iv)||typeof p.data!=='string'||p.data.length<24||p.data.length>1_500_000||!/^[A-Za-z0-9+/]+=*$/.test(p.data))return reply({error:'invalid_snapshot'},400);
-      const existing=await db.prepare('SELECT revision, updated_at, mutation_id FROM progress_vaults WHERE vault_id = ?').bind(env.VAULT_ID).first();
+      const existing=await db.prepare('SELECT revision, updated_at, mutation_id, payload FROM progress_vaults WHERE vault_id = ?').bind(env.VAULT_ID).first();
+      if(existing&&clientVersion<(JSON.parse(existing.payload).minClientVersion||1))return reply({error:'client_upgrade_required'},426);
       if(existing?.mutation_id===body.mutationId)return reply({version:existing.revision,updatedAt:existing.updated_at});
-      const now=Date.now(),payload=JSON.stringify(p);
+      const now=Date.now(),payload=JSON.stringify({format:p.format,iv:p.iv,data:p.data,...(clientVersion>=2?{minClientVersion:2}:{})});
       const result=body.expectedVersion===null
         ?await db.prepare('INSERT INTO progress_vaults (vault_id,revision,updated_at,mutation_id,payload) VALUES (?,1,?,?,?) ON CONFLICT(vault_id) DO NOTHING RETURNING revision,updated_at').bind(env.VAULT_ID,now,body.mutationId,payload).first()
         :await db.prepare('UPDATE progress_vaults SET revision=revision+1,updated_at=?,mutation_id=?,payload=? WHERE vault_id=? AND revision=? RETURNING revision,updated_at').bind(now,body.mutationId,payload,env.VAULT_ID,body.expectedVersion).first();

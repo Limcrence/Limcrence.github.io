@@ -7,6 +7,7 @@ import {SyncEngine} from '../src/lib/sync-engine.ts';
 import {CloudConflictError} from '../src/lib/cloud-api.ts';
 import {makeSnapshot,validateSnapshot} from '../src/lib/snapshot.ts';
 import {applyOperation,freshRecord} from '../src/lib/progress.ts';
+import {createStudy} from '../src/lib/study.ts';
 const db=new DatabaseSync(':memory:');db.exec(await fs.readFile(new URL('../../cloud-sync/schema.sql',import.meta.url),'utf8'));
 const binding={
   prepare(sql){return {bind(...args){return {async first(){return db.prepare(sql).get(...args)||null;}};}};},
@@ -14,7 +15,7 @@ const binding={
 };
 const identity=await deriveSyncIdentity(crypto.getRandomValues(new Uint8Array(32)));
 const env={DB:binding,VAULT_ID:identity.vaultId,ALLOWED_ORIGIN:'https://limcrence.github.io'};
-const url=`https://sync.test/v1/vault/${identity.vaultId}`;
+const url=`https://sync.test/v2/vault/${identity.vaultId}`;
 async function request(method,body,headers={}){return worker.fetch(new Request(url,{method,headers:{Origin:env.ALLOWED_ORIGIN,Authorization:`Bearer ${identity.token}`,...headers},...(body?{body:JSON.stringify(body)}:{})}),env);}
 let loseNextResponse=false;
 const api={read:async()=>{const r=await request('GET');assert.equal(r.status,200);return (await r.json()).record;},write:async value=>{const r=await request('PUT',value,{'Content-Type':'application/json'});if(r.status===409)throw new CloudConflictError();assert.equal(r.status,200);const result=await r.json();if(loseNextResponse){loseNextResponse=false;throw new Error('simulated lost response');}return result;}};
@@ -25,7 +26,7 @@ assert.equal(await api.read(),null);
 const ids=new Set(['q1','q2']),engines=[];
 function device(initial={}){
   let snapshot=makeSnapshot(initial,null),state,comparison;const store=new Map();
-  const d={get snapshot(){return snapshot;},get state(){return state;},get comparison(){return comparison;},store,edit(note){snapshot=makeSnapshot(applyOperation(Object.fromEntries(snapshot.records.map(r=>[r.questionId,r])),{questionId:'q1',op:'note',value:note}),snapshot.session);engine.localChanged();}};
+  const d={get snapshot(){return snapshot;},get state(){return state;},get comparison(){return comparison;},store,edit(note){snapshot=makeSnapshot(applyOperation(Object.fromEntries(snapshot.records.map(r=>[r.questionId,r])),{questionId:'q1',op:'note',value:note}),snapshot.session,snapshot.study);engine.localChanged();},setStudy(study){snapshot=makeSnapshot(Object.fromEntries(snapshot.records.map(r=>[r.questionId,r])),snapshot.session,study);engine.localChanged();}};
   const engine=new SyncEngine({identity,api,storage:{getItem:key=>store.get(key)||null,setItem:(key,value)=>store.set(key,value)},getSnapshot:()=>snapshot,applySnapshot:value=>{snapshot=value;},validate:value=>validateSnapshot(value,ids),onState:value=>{state=value;},onCompare:value=>{comparison=value;},debounceMs:100000});
   engines.push(engine);return {...d,get snapshot(){return snapshot;},get state(){return state;},get comparison(){return comparison;},engine};
 }
@@ -43,6 +44,16 @@ try{
   const one=await api.write(write),two=await api.write(write);assert.equal(one.version,two.version);
   await assert.rejects(()=>api.write({...write,mutationId:crypto.randomUUID()}),CloudConflictError);
   const stored=db.prepare('SELECT payload FROM progress_vaults').get().payload;assert.ok(!stored.includes('A newer'));assert.ok(!stored.includes(identity.token));
+  const oldUrl=url.replace('/v2/','/v1/');
+  const oldRead=await worker.fetch(new Request(oldUrl,{headers:{Origin:env.ALLOWED_ORIGIN,Authorization:`Bearer ${identity.token}`}}),env);assert.equal(oldRead.status,426);
+  const oldWrite=await worker.fetch(new Request(oldUrl,{method:'PUT',headers:{Origin:env.ALLOWED_ORIGIN,Authorization:`Bearer ${identity.token}`,'Content-Type':'application/json'},body:JSON.stringify({...write,expectedVersion:two.version,mutationId:crypto.randomUUID()})}),env);assert.equal(oldWrite.status,426);
+  assert.equal((await api.read()).version,two.version);
+  await a.engine.manual();await a.engine.choose('cloud');
+  const study=createStudy('Asia/Tokyo');study.plans=[{day:'2026-11-16',ids:['q1'],due:[],completed:[],skipped:[],independent:[],responses:{},estimates:{q1:180},minutes:30,createdAt:100,updatedAt:100}];study.updatedAt=100;
+  a.setStudy(study);await a.engine.sync();await b.engine.manual();await b.engine.choose('cloud');assert.deepEqual(b.snapshot.study,study);
+  const completed=structuredClone(study);completed.plans[0].completed=['q1'];completed.plans[0].updatedAt=101;completed.updatedAt=101;
+  a.setStudy(completed);await a.engine.sync();await b.engine.sync();assert.deepEqual(b.snapshot.study.plans[0].completed,['q1']);
+  const changedSettings=structuredClone(b.snapshot.study);changedSettings.settings.minutes=45;changedSettings.updatedAt=102;b.setStudy(changedSettings);await b.engine.sync();await a.engine.sync();assert.equal(a.snapshot.study.settings.minutes,45);
   assert.throws(()=>validateSnapshot({format:'reading-desk-snapshot-v1',records:[],session:{ids:['q1'],index:3}},ids));
-  console.log(JSON.stringify({manualLocalSelection:true,manualCloudSelection:true,replacedCopyBackedUp:true,automaticUploadAndDownload:true,concurrentEditsPrompt:true,lostResponseRetryIsIdempotent:true,staleSelectionCannotOverwrite:true,unauthorizedRejected:true,corsRestricted:true,encryptedOnlyInDatabase:true}));
+  console.log(JSON.stringify({manualLocalSelection:true,manualCloudSelection:true,replacedCopyBackedUp:true,automaticUploadAndDownload:true,concurrentEditsPrompt:true,lostResponseRetryIsIdempotent:true,staleSelectionCannotOverwrite:true,unauthorizedRejected:true,corsRestricted:true,encryptedOnlyInDatabase:true,oldClientCannotReadOrOverwriteNewPlan:true,dailyPlanCompletionAndSettingsSyncAcrossDevices:true}));
 }finally{engines.forEach(e=>e.dispose());db.close();}

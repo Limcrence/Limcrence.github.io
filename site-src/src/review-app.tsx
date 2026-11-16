@@ -1,3 +1,4 @@
+import {Practice} from './practice';
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -10,6 +11,8 @@ import {CloudSync} from './cloud-sync';
 import type {SyncIdentity} from './lib/sync-crypto';
 import type {SyncEngine} from './lib/sync-engine';
 import {makeSnapshot,validateSnapshot,type ProgressSnapshot,type ReadingSession} from './lib/snapshot';
+import {DailyDashboard} from './daily-dashboard';
+import {STUDY_KEY,createStudy,validateStudy,buildDailyPlan,savePlan,completePlan,recordReview,studyDay,paragraphHints,paragraphDescription,isParagraphMatch,needsGroupSubmission,type StudyState,type DailyPlan,type AttemptFeedback,type Outcome} from './lib/study';
 
 let library:Library;
 let questions:Question[]=[];
@@ -25,7 +28,7 @@ export function initializeLibrary(value:Library){
   wrong=questions.filter(originalWrong);blank=questions.filter(q=>q.status==='未作答');types=[...new Set(questions.map(q=>q.question_type))];
 }
 type Tab = "learning" | "mastered" | "blank" | "all";
-type Session = {ids:string[];index:number};
+type Session = ReadingSession;
 
 function Button({children,className="",...props}:React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return <button className={`button ${className}`} {...props}>{children}</button>;
@@ -66,7 +69,11 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
   const [lastSession,setLastSession]=useState<Session|null>(null);
   const [fontSize,setFontSize]=useState(17);
   const [toast,setToast]=useState("");
+  const [view,setView]=useState<'today'|'library'>('today');
+  const [study,setStudy]=useState<StudyState>(()=>createStudy());
+  const [clock,setClock]=useState(Date.now());
   const progressRef=useRef<Progress>({});
+  const studyRef=useRef<StudyState>(study);
   const positionRef=useRef<ReadingSession|null>(null);
   const engineRef=useRef<SyncEngine|null>(null);
   const toolsRef=useRef<HTMLDetailsElement>(null);
@@ -76,11 +83,17 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
     try{localStorage.setItem(PROGRESS_KEY,JSON.stringify({format:'reading-desk-progress-v1',records:Object.values(next)}));setSaveError(false);}catch{setSaveError(true);}
     if(notify)engineRef.current?.localChanged();
   },[]);
-  const getSnapshot=useCallback(()=>makeSnapshot(progressRef.current,positionRef.current),[]);
+  const persistStudy=useCallback((next:StudyState,notify=true)=>{
+    try{localStorage.setItem(STUDY_KEY,JSON.stringify(next));studyRef.current=next;setStudy(next);setSaveError(false);if(notify)engineRef.current?.localChanged();return true;}
+    catch{setSaveError(true);setToast('学习计划未能保存，请导出备份后重试');return false;}
+  },[]);
+  const getSnapshot=useCallback(()=>makeSnapshot(progressRef.current,positionRef.current,studyRef.current),[]);
   const applyCloud=useCallback((value:ProgressSnapshot)=>{
     // Save first; a failed local write must not acknowledge a cloud replacement.
     localStorage.setItem(PROGRESS_KEY,JSON.stringify({format:'reading-desk-progress-v1',records:value.records}));
     localStorage.setItem('reading-desk-session',JSON.stringify(value.session));
+    const nextStudy=value.study||{...createStudy(studyRef.current.settings.timeZone),settings:studyRef.current.settings};
+    localStorage.setItem(STUDY_KEY,JSON.stringify(nextStudy));studyRef.current=nextStudy;setStudy(nextStudy);
     positionRef.current=value.session;persist(Object.fromEntries(value.records.map(r=>[r.questionId,r])),false);setLastSession(value.session);setSession(value.session);
     if(!value.session)history.replaceState(null,'',location.pathname);
   },[persist]);
@@ -89,6 +102,7 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
     try{
       const saved=localStorage.getItem(PROGRESS_KEY);
       if(saved){const parsed=JSON.parse(saved);if(parsed.format!=='reading-desk-progress-v1')throw new Error('format');const records=validateRecords(parsed.records,new Set(byId.keys()));progressRef.current=Object.fromEntries(records.map(r=>[r.questionId,r]));setProgress(progressRef.current);}
+      const savedStudy=localStorage.getItem(STUDY_KEY);if(savedStudy){const next=validateStudy(JSON.parse(savedStudy),new Set(byId.keys()));studyRef.current=next;setStudy(next);}
     }catch{setLoadError(true);}
     setReady(true);
     try{
@@ -97,13 +111,14 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
       const size=Number(localStorage.getItem("reading-desk-font"));if(size>=15&&size<=22)setFontSize(size);
       const id=new URLSearchParams(location.hash.slice(1)).get("q");const q=id?byId.get(id):null;
       if(q){
-        if(last?.ids?.includes(q.id)&&last.ids.every((qid:string)=>byId.has(qid)))setSession({ids:last.ids,index:last.ids.indexOf(q.id)});
+        if(last?.ids?.includes(q.id)&&last.ids.every((qid:string)=>byId.has(qid)))setSession({...last,index:last.ids.indexOf(q.id)});
         else{const group=questions.filter(x=>x.exercise_id===q.exercise_id&&(originalWrong(q)?originalWrong(x):q.status==="未作答"?x.status==="未作答":true));setSession({ids:group.map(x=>x.id),index:group.findIndex(x=>x.id===q.id)});}
       }
     }catch{}
-    const onStorage=(e:StorageEvent)=>{if(e.key!==PROGRESS_KEY||!e.newValue)return;try{const records=validateRecords(JSON.parse(e.newValue).records,new Set(byId.keys()));progressRef.current=Object.fromEntries(records.map(r=>[r.questionId,r]));setProgress(progressRef.current);engineRef.current?.localChanged();}catch{}};
+    const onStorage=(e:StorageEvent)=>{if(!e.newValue)return;try{if(e.key===STUDY_KEY){const next=validateStudy(JSON.parse(e.newValue),new Set(byId.keys()));studyRef.current=next;setStudy(next);}else if(e.key===PROGRESS_KEY){const records=validateRecords(JSON.parse(e.newValue).records,new Set(byId.keys()));progressRef.current=Object.fromEntries(records.map(r=>[r.questionId,r]));setProgress(progressRef.current);}else return;engineRef.current?.localChanged();}catch{setLoadError(true);}};
     window.addEventListener('storage',onStorage);return()=>window.removeEventListener('storage',onStorage);
   },[]);
+  useEffect(()=>{const timer=setInterval(()=>setClock(Date.now()),60000);return()=>clearInterval(timer);},[]);
   useEffect(()=>{
     if(!session)return;
     try{localStorage.setItem("reading-desk-session",JSON.stringify(session));positionRef.current=session;setLastSession(session);history.replaceState(null,"",`#q=${encodeURIComponent(session.ids[session.index])}`);engineRef.current?.localChanged();}catch{}
@@ -133,20 +148,49 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
     return !search||haystack.includes(search.toLowerCase().trim());
   }),[tab,progress,source,sourceName,type,part,origin,search]);
   const exercises=library.exercises.filter(e=>matches.some(q=>q.exercise_id===e.id));
-  const start=(list:Question[],id?:string)=>{if(!list.length)return;setSession({ids:list.map(q=>q.id),index:id?Math.max(0,list.findIndex(q=>q.id===id)):0});};
+  const start=(list:Question[],id?:string)=>{if(!list.length)return;let next=progressRef.current;for(const q of list)next=applyOperation(next,{questionId:q.id,op:'draft',value:[]});persist(next);setSession({ids:list.map(q=>q.id),index:id?Math.max(0,list.findIndex(q=>q.id===id)):0});};
   const back=()=>{setSession(null);try{history.replaceState(null,"",location.pathname);}catch{}};
+  const plan=useMemo(()=>ready?buildDailyPlan(library,progress,study,clock):null,[ready,progress,study,clock]);
+  function startDaily(){
+    if(!plan||!ready||loadError)return;
+    const existing=studyRef.current.plans.find(p=>p.day===plan.day),nextPlan={...plan,skipped:[],updatedAt:Date.now()};
+    if(!persistStudy(savePlan(studyRef.current,nextPlan)))return;
+    const first=plan.ids.findIndex(id=>!plan.completed.includes(id));if(first<0)return;
+    if(!existing){let next=progressRef.current;for(const id of plan.ids)next=applyOperation(next,{questionId:id,op:'draft',value:[]});persist(next);}
+    setView('today');setSession({ids:plan.ids,index:first,kind:'daily',day:plan.day});
+  }
+  function submitted(rows:{q:Question;feedback:AttemptFeedback}[],day?:string){
+    if(loadError)return false;let next=progressRef.current,nextStudy=studyRef.current;
+    for(const {q,feedback} of rows){next=applyOperation(next,{questionId:q.id,op:'attempt',value:{answer:feedback.answer,result:feedback.result}});if(feedback.result!=='correct'||feedback.helped)nextStudy=recordReview(nextStudy,library,{id:feedback.eventId,questionId:q.id,at:feedback.at,outcome:'again',mode:feedback.mode,seconds:feedback.seconds});}
+    if(day){const p=nextStudy.plans.find(p=>p.day===day);if(p)nextStudy=savePlan(nextStudy,{...p,responses:{...p.responses,...Object.fromEntries(rows.map(r=>[r.q.id,r.feedback]))},updatedAt:Date.now()});}
+    if(!persistStudy(nextStudy))return false;persist(next);return true;
+  }
+  function reviewed(q:Question,feedback:AttemptFeedback,outcome:Outcome,day?:string){
+    if(loadError)return false;
+    const actual=feedback.result!=='correct'||feedback.helped?'again':outcome;
+    let next=recordReview(studyRef.current,library,{id:feedback.eventId,questionId:q.id,at:feedback.at,outcome:actual,mode:feedback.mode,seconds:feedback.seconds});
+    if(day)next=completePlan(next,day,q.id);return persistStudy(next);
+  }
+  function skipDaily(id:string,day:string){return persistStudy(completePlan(studyRef.current,day,id,true));}
+  function redoQuestion(id:string,day?:string){
+    if(!day)return true;const p=studyRef.current.plans.find(p=>p.day===day);if(!p)return false;
+    const responses={...p.responses};delete responses[id];
+    return persistStudy(savePlan(studyRef.current,{...p,responses,completed:p.completed.filter(x=>x!==id),updatedAt:Date.now()}));
+  }
 
   async function importBackup(file:File){
     if(file.size>12_000_000){setToast('备份文件太大，请选择导出的进度文件');return;}
     try{
-      const data=JSON.parse(await file.text());if(data.format!=='reading-desk-progress-v1')throw new Error('备份格式不正确');
-      const records=validateRecords(data.records,new Set(byId.keys()));
+      const data=JSON.parse(await file.text());if(!['reading-desk-progress-v1','reading-desk-snapshot-v1','reading-desk-snapshot-v2'].includes(data.format))throw new Error('备份格式不正确');
+      const snapshot=data.format==='reading-desk-progress-v1'?null:validateSnapshot(data,new Set(byId.keys()));
+      const records=snapshot?.records||validateRecords(data.records,new Set(byId.keys()));
       if(loadError){exportBackup();setLoadError(false);}
-      persist(mergeProgress(progressRef.current,records));setToast(`已合并 ${records.length} 条进度，较新的记录优先`);
+      if(snapshot?.study&&snapshot.study.updatedAt>=studyRef.current.updatedAt){exportBackup();if(!persistStudy(snapshot.study))return;}
+      persist(mergeProgress(progressRef.current,records));setToast(`已合并 ${records.length} 条进度，较新的记录和学习计划优先`);
     }catch(error){setToast(error instanceof Error?error.message:'导入失败，现有进度未改变');}
   }
   function exportBackup(){
-    const data={format:"reading-desk-progress-v1",exportedAt:new Date().toISOString(),records:Object.values(progress)};
+    const data={...getSnapshot(),exportedAt:new Date().toISOString()};
     const contents=loadError?(localStorage.getItem(PROGRESS_KEY)||'{}'):JSON.stringify(data,null,2);
     const url=URL.createObjectURL(new Blob([contents],{type:"application/json"}));
     const a=document.createElement("a");a.href=url;a.download=`阅读错题本-复习进度-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -156,12 +200,12 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
 
   return <div className={`app-shell ${session?"is-practicing":""}`}>
     <header className="app-header">
-      <button className="brand" onClick={back} aria-label="返回练习库"><span className="brand-icon"><BookOpen size={21} strokeWidth={1.7}/></span><span>阅读错题本<small>READING DESK</small></span></button>
-      <div className="header-middle">{session?<button className="back-link" onClick={back}><ArrowLeft size={16}/>练习库</button>:<span>原文、题目和解析，一起复习</span>}</div>
+      <button className="brand" onClick={()=>{back();setView('today');}} aria-label="返回今日计划"><span className="brand-icon"><BookOpen size={21} strokeWidth={1.7}/></span><span>阅读错题本<small>READING DESK</small></span></button>
+      <div className="header-middle">{session?<button className="back-link" onClick={back}><ArrowLeft size={16}/>{session.kind==='daily'?'今日计划':'练习库'}</button>:<nav className="main-nav"><button className={view==='today'?'active':''} onClick={()=>setView('today')}>今日计划</button><button className={view==='library'?'active':''} onClick={()=>setView('library')}>练习库</button></nav>}</div>
       <div className="header-actions">{syncStatus}<CloudSync identity={syncIdentity} ready={ready&&!loadError} engineRef={engineRef} getSnapshot={getSnapshot} applySnapshot={applyCloud} validate={validateCloud}/><details className="tools-menu" ref={toolsRef}><summary className="icon-button" aria-label="更多操作"><MoreHorizontal size={21}/></summary><div className="dropdown"><a href="/">返回个人空间</a><button onClick={lock}><LockKeyhole size={16}/>锁定复习空间</button><p>点右上角“云端同步”，选好版本后自动保存到云端。导出文件也可作为独立备份。</p><button onClick={exportBackup} disabled={!ready}><Download size={16}/>导出复习进度</button><button onClick={()=>{importRef.current?.click();toolsRef.current?.removeAttribute("open");}} disabled={!ready}><Upload size={16}/>导入复习进度</button></div></details><input ref={importRef} type="file" accept=".json,application/json" className="visually-hidden" onChange={e=>{if(e.target.files?.[0])void importBackup(e.target.files[0]);e.target.value="";}}/></div>
     </header>
 
-    {session?<Practice markRemainder={markRemainder} key={session.ids.join(",")} session={session} setSession={setSession} progress={progress} update={update} fontSize={fontSize} changeFont={n=>{setFontSize(n);try{localStorage.setItem("reading-desk-font",String(n));}catch{}}} back={back} ready={ready}/>:<div className="library-layout">
+    {session?<Practice library={library} onRedo={redoQuestion} markRemainder={markRemainder} key={`${session.day||'free'}:${session.ids.join(',')}`} session={session} setSession={setSession} progress={progress} update={update} fontSize={fontSize} changeFont={n=>{setFontSize(n);try{localStorage.setItem("reading-desk-font",String(n));}catch{}}} back={back} ready={ready&&!loadError} dailyPlan={study.plans.find(p=>p.day===session.day)} onSubmitted={submitted} onReviewed={reviewed} onSkip={skipDaily}/>:view==='today'?plan?<DailyDashboard library={library} progress={progress} study={study} plan={plan} ready={ready&&!loadError} onStart={startDaily} onLibrary={()=>setView('library')} onMinutes={minutes=>persistStudy({...studyRef.current,settings:{...studyRef.current.settings,minutes},updatedAt:Date.now()})}/>:<main className="daily-main">正在准备今日计划…</main>:<div className="library-layout">
       <aside className="sidebar"><div className="sidebar-top"><p className="eyebrow">我的练习</p>{[["all","全部练习",BookOpen],["周测","每周周测",FileText],["专项练习","题型专项",List],["真题汇总","考场真题",BookOpen]].map(([value,label,Icon])=>{const IconComponent=Icon as typeof BookOpen;return <button key={String(value)} className={`sidebar-link ${source===value?"active":""}`} onClick={()=>{setSource(String(value));setSourceName("all");}}><IconComponent size={18}/><span>{String(label)}</span><small>{library.exercises.filter(e=>value==="all"||e.source_type===value).length}</small></button>;})}</div><div className="sidebar-bottom"><span className="quiet-label">复习进度</span><div className="mastery-number">{masteredCount}<span> / {wrong.length} 题已掌握</span></div><div className="progress-track"><i style={{width:`${masteredCount/wrong.length*100}%`}}/></div><p>学会一道，就少一道。</p><span className="data-date">题库整理于 2026.11.08</span></div></aside>
       <main className="library-main">
         <nav className="mobile-sources" aria-label="按来源筛选">{[['all','全部'],['周测','周测'],['专项练习','专项练习'],['真题汇总','真题汇总']].map(([value,label])=><button key={value} className={source===value?'active':''} onClick={()=>{setSource(value);setSourceName('all');}}>{label}</button>)}</nav>
@@ -183,87 +227,3 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
     {toast&&<div className="toast" role="status">{toast}</div>}
   </div>;
 }
-
-function Practice({session,setSession,progress,update,fontSize,changeFont,back,ready,markRemainder}:{session:Session;setSession:(s:Session)=>void;progress:Progress;update:(op:SaveOperation,debounced?:boolean)=>void;fontSize:number;changeFont:(n:number)=>void;back:()=>void;ready:boolean;markRemainder:(q:Question,value:Origin)=>void}){
-  const q=byId.get(session.ids[session.index])!;
-  const article=articleMap.get(q.article_id)!;
-  const record=progress[q.id]||freshRecord(q.id);
-  const [shownId,setShownId]=useState("");
-  const shown=shownId===q.id;
-  const setShown=(value:boolean)=>setShownId(value?q.id:"");
-  const [revealOnly,setRevealOnly]=useState(false);
-  const [highlight,setHighlight]=useState(true);
-  const [mobilePane,setMobilePane]=useState("question");
-  const [context,setContext]=useState(false);
-  const [answerAtReveal,setAnswerAtReveal]=useState<string[]>([]);
-  const [queueOpen,setQueueOpen]=useState(false);
-  const queueRef=useRef<HTMLDialogElement>(null);
-  const passageRef=useRef<HTMLDivElement>(null);
-  const questionRef=useRef<HTMLDivElement>(null);
-  const formRef=useRef<HTMLFormElement>(null);
-  const currentId=q.id;
-  const prevArticle=useRef(q.article_id);
-  useEffect(()=>{
-    setShown(false);setRevealOnly(false);setContext(false);setAnswerAtReveal([]);
-    questionRef.current?.scrollTo({top:0});
-    if(prevArticle.current!==q.article_id){passageRef.current?.scrollTo({top:0});prevArticle.current=q.article_id;}
-  },[currentId,q.article_id]);
-  useEffect(()=>{if(queueOpen&&!queueRef.current?.open)queueRef.current?.showModal();if(!queueOpen&&queueRef.current?.open)queueRef.current?.close();},[queueOpen]);
-  const navigate=useCallback((offset:number)=>{const next=session.index+offset;if(next>=session.ids.length){back();return;}if(next>=0)setSession({...session,index:next});},[session,setSession,back]);
-  useEffect(()=>{
-    function keyboard(e:KeyboardEvent){
-      const target=e.target as HTMLElement;
-      if(target.closest("input,textarea,select,button,summary,[contenteditable=true],dialog")||e.ctrlKey||e.metaKey||e.altKey||queueOpen)return;
-      if(e.key==="ArrowRight"){e.preventDefault();navigate(1);}if(e.key==="ArrowLeft"){e.preventDefault();navigate(-1);}
-      if(e.key==="Enter"){e.preventDefault();if(shown)navigate(1);else formRef.current?.requestSubmit();}
-    }document.addEventListener("keydown",keyboard);return()=>document.removeEventListener("keydown",keyboard);
-  },[navigate,shown,queueOpen]);
-  const options=Object.entries(q.options);
-  const hasOptions=options.length>0;
-  const multi=hasOptions&&q.points>1;
-  const answer=record.draft;
-  const hasAnswer=hasOptions?answer.length>0:!!answer[0]?.trim();
-  const result=gradeAnswer(q,answerAtReveal);
-  const groupQuestions=questions.filter(x=>x.exercise_id===q.exercise_id&&x.group_id===q.group_id);
-  const currentExerciseQuestions=session.ids.filter(id=>byId.get(id)?.exercise_id===q.exercise_id);
-  const review=q.review;
-  const needles=review?[...review.evidence.map(e=>e.text),...review.anchors]:[];
-  const locate=()=>{
-    setMobilePane("passage");setHighlight(true);
-    setTimeout(()=>{
-      const label=review?.evidence[0]?.paragraph;
-      const index=article.paragraphs.findIndex(p=>p.label===label);
-      if(index>=0)passageRef.current?.querySelector(`[data-paragraph-index="${index}"]`)?.scrollIntoView({behavior:"smooth",block:"center"});
-    },60);
-  };
-  const submit=(direct=false)=>{
-    if(!direct&&!hasAnswer)return;
-    setAnswerAtReveal([...answer]);setRevealOnly(direct);setShown(true);
-    update({questionId:q.id,op:"attempt",value:{answer:[...answer],result:direct?"revealed":gradeAnswer(q,answer).result}});
-    setTimeout(()=>questionRef.current?.querySelector(".answer-feedback")?.scrollIntoView({behavior:"smooth",block:"start"}),60);
-  };
-  function choose(key:string){
-    if(shown)return;
-    const next=multi?(answer.includes(key)?answer.filter(v=>v!==key):answer.length<q.points?[...answer,key]:answer):[key];
-    update({questionId:q.id,op:"draft",value:next},true);
-  }
-  const mastery=record.state==="mastered";
-  const changeMastery=()=>update({questionId:q.id,op:"state",value:mastery?"learning":"mastered"});
-
-  const Passage=<section className="passage-pane"><div className="pane-toolbar"><span><BookOpen size={15}/>阅读原文</span><div className="font-controls"><button aria-label="缩小原文字号" disabled={fontSize<=15} onClick={()=>changeFont(fontSize-1)}>A−</button><button aria-label="放大原文字号" disabled={fontSize>=22} onClick={()=>changeFont(fontSize+1)}>A+</button></div></div><div className="passage-scroll" ref={passageRef} style={{fontSize}}><div className="passage-heading"><p>{q.passage_code}</p><h1>{article.title}</h1><small>{shortSource(q)}</small></div>{article.paragraphs.map((p,i)=><p className={`passage-paragraph ${shown&&highlight&&review?.evidence.some(e=>e.paragraph===p.label)?"evidence-paragraph":""}`} key={`${p.label}-${i}`} data-paragraph-index={i}><span className="paragraph-label">{p.label}</span><MarkedText text={p.text} needles={needles} enabled={shown&&highlight}/></p>)}<p className="article-note">P 编号用于阅读定位；字母段号保留原文标注。</p></div></section>;
-
-  const QuestionPane=<section className="question-pane"><div className="pane-toolbar"><span>{q.question_type}</span><button className="text-button" onClick={()=>setQueueOpen(true)}><List size={15}/>题目列表<span>{session.index+1}/{session.ids.length}</span></button></div><form ref={formRef} className="question-form" onSubmit={e=>{e.preventDefault();if(!shown)submit();}}><div className="question-scroll" ref={questionRef}><div className="question-heading"><span className="eyebrow">QUESTION {displayNumber(q)}</span>{mastery&&<span className="mastered-label"><Check size={13}/>已掌握</span>}</div><div className="origin-controls"><label>当时这道题<select aria-label="本题原作答情况" value={record.origin||'unknown'} onChange={e=>update({questionId:q.id,op:'origin',value:e.target.value})}><option value="unknown">尚未标记</option><option value="serious">认真作答</option><option value="rushed">赶时间蒙答</option></select></label><button type="button" onClick={()=>markRemainder(q,'rushed')}>从本题到篇末标为蒙答</button></div><p className="answer-instructions">{q.instructions}</p><h2 className="question-text"><QuestionText text={q.question}/></h2>{q.full_context&&<button type="button" className="context-toggle" onClick={()=>setContext(!context)}><FileText size={15}/>{context?"收起完整题组":"查看完整摘要 / 题组"}</button>}{context&&<div className="full-context"><p>{q.full_context}</p><details><summary>该题组全部问题</summary>{groupQuestions.map(item=><p key={item.id}><strong>{displayNumber(item)}. </strong>{item.question}</p>)}</details></div>}
-        {!!q.image_urls.length&&<div className="question-images">{q.image_urls.filter(url=>/^https:\/\//.test(url)).map((url,i)=><img key={url} src={url} alt={`原题图示 ${i+1}`} loading="lazy"/>)}<a href={q.report_url} target="_blank" rel="noreferrer">图示或编号看不清？打开原报告<ExternalLink size={13}/></a></div>}
-        {hasOptions?<fieldset className={`answer-options ${q.question_type==="细节段落匹配"?"compact-options":""}`} disabled={shown||!ready}><legend>{multi?`请选择 ${q.points} 项` : "选择你的答案"}</legend>{options.map(([key,label])=>{
-          const selected=answer.includes(key);const correct=shown&&q.correct_answer_raw.includes(key);const incorrect=shown&&selected&&!correct;
-          return <label className={`answer-option ${selected?"selected":""} ${correct?"correct-option":""} ${incorrect?"wrong-option":""}`} key={key}><input type={multi?"checkbox":"radio"} name={`answer-${q.id}`} checked={selected} onChange={()=>choose(key)}/><span className="option-letter">{key}</span><span className="option-text">{label||`Paragraph ${key}`}</span>{correct&&<Check size={17}/>}</label>;
-        })}</fieldset>:<label className="fill-answer">你的答案<input aria-label="填写你的答案" autoComplete="off" spellCheck={false} placeholder="在这里输入答案…" value={answer[0]||""} maxLength={256} disabled={shown||!ready} onChange={e=>update({questionId:q.id,op:"draft",value:[e.target.value]},true)}/><small>按原题词数要求作答，提交后核对。</small></label>}
-        {shown&&<section className="answer-feedback" aria-live="polite"><div className={`feedback-heading ${revealOnly?"neutral":result.result}`}><span>{revealOnly?"一起看看这道题":result.result==="correct"?"这次答对了":result.result==="partial"?`选对了 ${result.earned}/${result.total} 项` :"再看一遍关键线索"}</span><button type="button" onClick={()=>{setShown(false);setRevealOnly(false);questionRef.current?.scrollTo({top:0,behavior:"smooth"});}}><RotateCcw size={14}/>再做一次</button></div><div className="answer-comparison"><div><span>原练习的答案</span><p className="old-answer">{originalAnswer(q)}</p></div><div><span>正确答案 · 原网站</span><p className="right-answer">{q.correct_answer}</p></div></div>{review?<><div className="analysis-section"><div className="analysis-title"><h3>原文定位 <small>{review.location}</small></h3><button type="button" className="text-button" onClick={locate}><MapPin size={14}/>定位原文</button></div>{review.evidence.filter((e,i,all)=>all.findIndex(x=>x.paragraph===e.paragraph&&x.text===e.text)===i).map((e,i)=><blockquote key={i}><span>{e.paragraph}</span>{e.text}</blockquote>)}<label className="highlight-toggle"><input type="checkbox" checked={highlight} onChange={e=>setHighlight(e.target.checked)}/>高亮原文中的关键句</label></div><div className="analysis-section"><h3>同义替换</h3><p className="paraphrases">{review.paraphrases}</p></div><div className="analysis-section"><h3>原错题解析</h3><p>{review.explanation}</p><small className="analysis-credit">定位与解析由 AI 整理，可结合原文核对。</small></div></>:<div className="analysis-section"><p>这道题暂无独立解析，可以结合左侧原文和原网站答案核对。</p></div>}<div className="note-section"><label htmlFor="question-note">我的复习笔记 <small>自动保存</small></label><textarea id="question-note" placeholder="记录这次容易混淆的词、定位线索或错因…" maxLength={4000} value={record.note} onChange={e=>update({questionId:q.id,op:"note",value:e.target.value},true)}/></div><a className="original-report" href={q.report_url} target="_blank" rel="noreferrer">查看学校原报告<ExternalLink size={13}/><span>报告题号 {q.question_number}</span></a></section>}
-      </div><footer className="answer-footer"><button type="button" className="icon-button previous-question" disabled={session.index===0} onClick={()=>navigate(-1)} aria-label="上一题"><ArrowLeft size={18}/></button>{!shown?<><button type="button" className="reveal-button" disabled={!ready} onClick={()=>submit(true)}>暂时不会，看解析</button><Button className="primary" type="submit" disabled={!hasAnswer||!ready}>核对答案<Check size={17}/></Button></>:<><Button type="button" className={`mastery-button ${mastery?"is-mastered":""}`} onClick={changeMastery}>{mastery?<CheckCircle2 size={16}/>:<Check size={16}/>}{mastery?"已掌握":"标记已掌握"}</Button><Button className="primary" type="button" onClick={()=>navigate(1)}>{session.index===session.ids.length-1?"完成练习":"下一题"}<ArrowRight size={17}/></Button></>}</footer></form></section>;
-
-  return <main className="practice-main"><div className="practice-topline"><div className="practice-breadcrumb"><span>{shortSource(q)}</span><span>/</span><strong>{q.passage_code}</strong></div><div className="practice-top-right"><span>{session.index+1} / {session.ids.length} 题</span><Button className="finish-button" onClick={back}>结束本次练习</Button></div></div><div className="mobile-tabs"><button className={mobilePane==="passage"?"active":""} onClick={()=>setMobilePane("passage")}>阅读原文</button><button className={mobilePane==="question"?"active":""} onClick={()=>setMobilePane("question")}>题目与解析</button></div><div className={`reading-workspace mobile-${mobilePane}`}><Group orientation="horizontal" className="reading-group" id="reading-layout"><Panel defaultSize="53%" minSize="32%" id="passage" className="passage-panel">{Passage}</Panel><Separator className="reading-separator"><GripVertical size={13}/></Separator><Panel defaultSize="47%" minSize="34%" id="question" className="question-panel">{QuestionPane}</Panel></Group></div><footer className="practice-bottom"><div className="question-chips"><span>本篇</span>{currentExerciseQuestions.map(id=>{const item=byId.get(id)!;return <button className={`${id===q.id?"current":""} ${progress[id]?.state==="mastered"?"mastered":""}`} key={id} onClick={()=>setSession({...session,index:session.ids.indexOf(id)})} aria-label={`第 ${displayNumber(item)} 题`}>{displayNumber(item)}</button>;})}</div><span className="keyboard-tip">← → 切题 <i/> Enter 提交</span></footer><dialog ref={queueRef} onCancel={()=>setQueueOpen(false)} onClose={()=>setQueueOpen(false)} className="queue-dialog"><div className="dialog-heading"><div><h2>本次练习</h2><p>{session.ids.length} 道题，点击直接切换。</p></div><button className="icon-button" onClick={()=>setQueueOpen(false)} aria-label="关闭题目列表"><X size={21}/></button></div><div className="queue-list">{session.ids.map((id,i)=>{const item=byId.get(id)!;return <button className={id===q.id?"current":""} key={id} onClick={()=>{setSession({...session,index:i});setQueueOpen(false);}}><span>{String(i+1).padStart(2,"0")}</span><div><strong>{item.passage_code} · 第 {displayNumber(item)} 题</strong><p>{shortSource(item)} · {item.question_type}</p></div>{progress[id]?.state==="mastered"?<CheckCircle2 size={18}/>:id===q.id?<ArrowRight size={17}/>:null}</button>;})}</div></dialog></main>;
-}
-
-
-
-

@@ -32,4 +32,4 @@ export function mergeProgress(current:Progress,incoming:ReviewRecord[]):Progress
   for(const record of incoming)if(!next[record.questionId]||record.updatedAt>next[record.questionId].updatedAt)next[record.questionId]=record;
   return next;
 }
-export function passagePart(code:string){return code.match(/(?:_|\s)R([123])(?:\b|_)/i)?.[1]||'';}
+export function passagePart(code:string){return code.match(/(?:_|\s)R([123])(?:\b|_)/i)?.[1]||code.match(/(?:^|[-_\s])(?:P|Passage\s*)([123])(?:\b|[-_])/i)?.[1]||'';}

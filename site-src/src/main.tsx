@@ -6,6 +6,7 @@ import { base64, decryptLibrary, deriveKey, rememberedKey, REMEMBER_KEY, type En
 import type { Library } from './lib/types';
 import {deriveSyncIdentity,type SyncIdentity} from './lib/sync-crypto';
 import './reading.css';
+import './daily.css';
 
 function Gate(){
   const [unlocked,setUnlocked]=useState(false),[password,setPassword]=useState(''),[remember,setRemember]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');

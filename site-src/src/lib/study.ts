@@ -1,0 +1,100 @@
+import {createEmptyCard,fsrs,Rating,type Card} from 'ts-fsrs';
+import type {Article,Library,Progress,Question} from './types';
+import {passagePart} from './progress.ts';
+
+export const STUDY_KEY='reading-desk-study-v1';
+export type Outcome='again'|'hard'|'good';
+export type ReviewMode='guided'|'independent';
+type SavedCard=Omit<Card,'due'|'last_review'>&{due:number;last_review?:number};
+export type StudyCard={memory:SavedCard;dueDay:string;lastDay:string;lastOutcome:Outcome;guidedPasses:number;independentPasses:number};
+export type ReviewEvent={id:string;questionId:string;key:string;at:number;day:string;outcome:Outcome;mode:ReviewMode;seconds:number;part:string;learningCheck:boolean};
+export type AttemptFeedback={eventId:string;at:number;answer:string[];result:'correct'|'wrong'|'partial'|'revealed';mode:ReviewMode;seconds:number;revealed:boolean;helped:boolean};
+export type DailyPlan={day:string;ids:string[];due:string[];completed:string[];skipped:string[];independent:string[];responses:Record<string,AttemptFeedback>;estimates:Record<string,number>;minutes:number;createdAt:number;updatedAt:number};
+export type StudyState={format:'reading-desk-study-v1';settings:{minutes:number;timeZone:string};cards:Record<string,StudyCard>;events:ReviewEvent[];plans:DailyPlan[];updatedAt:number};
+const scheduler=fsrs({request_retention:0.9,enable_fuzz:false,enable_short_term:false,maximum_interval:120});
+const targets:Record<string,number>={'1':.25,'2':.35,'3':.4,'':0};
+const outcomes=['again','hard','good'];
+export function createStudy(timeZone=Intl.DateTimeFormat().resolvedOptions().timeZone):StudyState{return {format:'reading-desk-study-v1',settings:{minutes:30,timeZone},cards:{},events:[],plans:[],updatedAt:0};}
+export function studyDay(at:number,timeZone:string){const parts=new Intl.DateTimeFormat('en-US',{timeZone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(at);return ['year','month','day'].map(type=>parts.find(p=>p.type===type)!.value).join('-');}
+export function shiftDay(day:string,n:number){return new Date(Date.parse(day+'T12:00:00Z')+n*86400000).toISOString().slice(0,10);}
+export function questionPart(q:Question){return passagePart(q.passage_code)||passagePart(q.assignment_group)||'';}
+export function paragraphHints(q:Question,article:Article){return [...new Set(q.review?.evidence.map(e=>e.paragraph)||[])].filter(label=>article.paragraphs.some(p=>p.label===label));}
+export function paragraphDescription(labels:string[],article:Article){return labels.map(label=>{const index=article.paragraphs.findIndex(p=>p.label===label);return /^P\d+$/i.test(label)?`第 ${index+1} 段`:`第 ${index+1} 段（${label} 段）`;}).join('、');}
+export function isParagraphMatch(q:Question){return q.question_type==='细节段落匹配';}
+export function needsGroupSubmission(q:Question){return /Summary|Heading|表格|选词|匹配/.test(q.question_type);}
+export type QuestionIndex={groups:Map<string,Question[]>;keyById:Map<string,string>};
+export function indexQuestions(questions:Question[]):QuestionIndex{
+  const grouped=new Map<string,Question[]>();
+  for(const q of questions){const fingerprint=JSON.stringify([q.article_id,q.question_type,q.question,q.full_context,Object.entries(q.options).sort(),[...q.correct_answer_raw].sort(),q.points]);const group=grouped.get(fingerprint)||[];group.push(q);grouped.set(fingerprint,group);}
+  const groups=new Map<string,Question[]>(),keyById=new Map<string,string>();
+  for(const group of grouped.values()){const key=group.map(q=>q.id).sort()[0];groups.set(key,group);for(const q of group)keyById.set(q.id,key);}
+  return {groups,keyById};
+}
+function seeded(value:string){let hash=2166136261;for(const c of value){hash^=c.charCodeAt(0);hash=Math.imul(hash,16777619);}return (hash>>>0)/4294967296;}
+function estimate(q:Question,study:StudyState){const recent=study.events.filter(e=>e.part===questionPart(q)&&!e.learningCheck&&e.seconds>=20).slice(-12).map(e=>e.seconds).sort((a,b)=>a-b);const base=recent.length>=3?recent[Math.floor(recent.length/2)]:({'1':150,'2':210,'3':270} as Record<string,number>)[questionPart(q)]||210;return Math.max(90,Math.min(420,base+(q.points>1?45:0)));}
+export function buildDailyPlan(library:Library,progress:Progress,study:StudyState,now=Date.now()):DailyPlan{
+  const day=studyDay(now,study.settings.timeZone),existing=study.plans.find(p=>p.day===day);if(existing)return existing;
+  const index=indexQuestions(library.questions),weekStart=shiftDay(day,-6),spent:Record<string,number>={'1':0,'2':0,'3':0,'':0};
+  for(const e of study.events)if(e.day>=weekStart&&!e.learningCheck)spent[e.part]=(spent[e.part]||0)+e.seconds;
+  const candidates=[...index.groups].flatMap(([key,rows])=>{
+    const q=[...rows].sort((a,b)=>Number(!!b.review)-Number(!!a.review)||Number(progress[b.id]?.origin==='serious')-Number(progress[a.id]?.origin==='serious'))[0];
+    const card=study.cards[key];if(card&&card.dueDay>day)return [];
+    const relevant=rows.some(r=>['答错','部分正确','未作答'].includes(r.status)||progress[r.id]?.origin==='rushed');if(!card&&!relevant)return [];
+    const overdue=card?Math.max(0,(Date.parse(day)-Date.parse(card.dueDay))/86400000):0;
+    const newWrong=rows.some(r=>['答错','部分正确'].includes(r.status)&&progress[r.id]?.origin!=='rushed');
+    return [{key,q,due:!!card,seconds:estimate(q,study),score:card?1000+Math.min(30,overdue)*12+(card.lastOutcome==='again'?130:0):newWrong?(progress[q.id]?.state==='mastered'?45:90):20}];
+  });
+  const selected:typeof candidates=[],articles=new Set<string>(),partTime:Record<string,number>={'1':0,'2':0,'3':0,'':0};let used=0,newTime=0;
+  const budget=Math.max(300,(study.settings.minutes-3)*60),hasDue=candidates.some(c=>c.due);
+  while(candidates.length){
+    const total=Object.values(spent).reduce((a,b)=>a+b,0)+used+1;
+    candidates.sort((a,b)=>{const score=(c:typeof a)=>c.score+((targets[questionPart(c.q)]||0)-(spent[questionPart(c.q)]+partTime[questionPart(c.q)])/total)*90+(articles.has(c.q.article_id)?18:0)+seeded(day+c.key)*25;return score(b)-score(a);});
+    const pick=candidates.findIndex(c=>{const cost=c.seconds+(articles.has(c.q.article_id)?0:75);return used+cost<=budget&&(articles.has(c.q.article_id)||articles.size<3)&&(!hasDue||c.due||newTime+c.seconds<=study.settings.minutes*60*.3)&&(questionPart(c.q)!=='3'||partTime['3']+c.seconds<=study.settings.minutes*60*.5||!candidates.some(x=>questionPart(x.q)!=='3'));});
+    if(pick<0)break;const [c]=candidates.splice(pick,1);used+=c.seconds+(articles.has(c.q.article_id)?0:75);articles.add(c.q.article_id);selected.push(c);partTime[questionPart(c.q)]+=c.seconds;if(!c.due)newTime+=c.seconds;
+  }
+  const ordered=[...articles].flatMap(article=>selected.filter(c=>c.q.article_id===article).sort((a,b)=>library.questions.indexOf(a.q)-library.questions.indexOf(b.q)));
+  return {day,ids:ordered.map(c=>c.q.id),due:ordered.filter(c=>c.due).map(c=>c.q.id),completed:[],skipped:[],responses:{},independent:ordered.filter(c=>{const card=study.cards[c.key];return isParagraphMatch(c.q)||!!card&&card.guidedPasses>=2&&card.lastOutcome!=='again';}).map(c=>c.q.id),estimates:Object.fromEntries(ordered.map(c=>[c.q.id,c.seconds])),minutes:study.settings.minutes,createdAt:now,updatedAt:now};
+}
+export function savePlan(study:StudyState,plan:DailyPlan):StudyState{return {...study,plans:[...study.plans.filter(p=>p.day!==plan.day),plan].slice(-60),updatedAt:plan.updatedAt};}
+export function completePlan(study:StudyState,day:string,id:string,skip=false,now=Date.now()):StudyState{
+  const plan=study.plans.find(p=>p.day===day);if(!plan||!plan.ids.includes(id))return study;
+  return savePlan(study,{...plan,completed:skip?plan.completed:[...new Set([...plan.completed,id])],skipped:skip?[...new Set([...plan.skipped,id])]:plan.skipped.filter(x=>x!==id),updatedAt:now});
+}
+export function recordReview(study:StudyState,library:Library,input:Omit<ReviewEvent,'day'|'part'|'key'|'learningCheck'>):StudyState{
+  if(study.events.some(e=>e.id===input.id))return study;
+  const q=library.questions.find(q=>q.id===input.questionId);if(!q)return study;
+  const key=indexQuestions(library.questions).keyById.get(q.id)!,old=study.cards[key],day=studyDay(input.at,study.settings.timeZone),sameDay=old?.lastDay===day;
+  const event:ReviewEvent={...input,seconds:Math.max(0,Math.min(1800,input.seconds)),key,day,part:questionPart(q),learningCheck:sameDay};
+  const card:Card=old?{...old.memory,due:new Date(old.memory.due),last_review:old.memory.last_review?new Date(old.memory.last_review):undefined}:createEmptyCard(new Date(input.at));
+  const rating=input.outcome==='good'?Rating.Good:input.outcome==='hard'?Rating.Hard:Rating.Again;
+  const reviewed=scheduler.repeat(card,new Date(input.at))[rating].card;
+  let days=Math.max(1,Math.round(reviewed.scheduled_days));if(input.outcome==='again')days=1;
+  if(!old&&input.outcome==='hard')days=Math.min(2,days);
+  const memory:SavedCard={...reviewed,due:input.at+days*86400000,last_review:reviewed.last_review?.getTime()};
+  let next:StudyCard={memory,dueDay:shiftDay(day,days),lastDay:day,lastOutcome:input.outcome,guidedPasses:(old?.guidedPasses||0)+(input.outcome==='good'&&input.mode==='guided'?1:0),independentPasses:(old?.independentPasses||0)+(input.outcome==='good'&&input.mode==='independent'?1:0)};
+  // A same-day retry can expose a weakness, but cannot grow long-term stability.
+  if(sameDay){next={...old,lastOutcome:input.outcome==='again'?'again':old.lastOutcome};if(input.outcome==='again')next={...next,dueDay:shiftDay(day,1),memory:{...old.memory,due:input.at+86400000}};}
+  return {...study,cards:{...study.cards,[key]:next},events:[...study.events,event],updatedAt:input.at};
+}
+export function validateStudy(value:unknown,ids:Set<string>):StudyState{
+  if(!value||typeof value!=='object')throw new Error('学习计划格式不正确');const s=value as StudyState;
+  const finite=(n:unknown)=>typeof n==='number'&&Number.isFinite(n)&&n>=0;
+  const date=(d:unknown)=>typeof d==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(d)&&Number.isFinite(Date.parse(d));
+  const validId=(id:unknown)=>typeof id==='string'&&ids.has(id);
+  if(s.format!=='reading-desk-study-v1'||!s.settings||!Number.isInteger(s.settings.minutes)||s.settings.minutes<10||s.settings.minutes>90||typeof s.settings.timeZone!=='string'||!finite(s.updatedAt))throw new Error('学习设置不正确');
+  try{studyDay(0,s.settings.timeZone);}catch{throw new Error('学习时区不正确');}
+  if(!s.cards||typeof s.cards!=='object'||Array.isArray(s.cards)||Object.keys(s.cards).length>ids.size||!Array.isArray(s.events)||s.events.length>50000||!Array.isArray(s.plans)||s.plans.length>60)throw new Error('学习记录格式不正确');
+  for(const [key,c] of Object.entries(s.cards)){
+    if(!validId(key)||!c||!date(c.dueDay)||!date(c.lastDay)||!outcomes.includes(c.lastOutcome)||!Number.isInteger(c.guidedPasses)||c.guidedPasses<0||!Number.isInteger(c.independentPasses)||c.independentPasses<0||!c.memory)throw new Error('复习间隔记录不正确');
+    for(const field of ['due','stability','difficulty','elapsed_days','scheduled_days','reps','lapses','state','learning_steps'] as const)if(!finite(c.memory[field]))throw new Error('复习算法状态不正确');
+    if(![0,1,2,3].includes(c.memory.state)||c.memory.last_review!==undefined&&!finite(c.memory.last_review))throw new Error('复习算法时间不正确');
+  }
+  const eventIds=new Set<string>();for(const e of s.events){if(!e||typeof e.id!=='string'||e.id.length>100||eventIds.has(e.id)||!validId(e.questionId)||!validId(e.key)||!finite(e.at)||!date(e.day)||!outcomes.includes(e.outcome)||!['guided','independent'].includes(e.mode)||!finite(e.seconds)||e.seconds>1800||!['','1','2','3'].includes(e.part)||typeof e.learningCheck!=='boolean')throw new Error('复习日志不正确');eventIds.add(e.id);}
+  const days=new Set<string>();for(const p of s.plans){
+    if(!p||!date(p.day)||days.has(p.day)||![p.createdAt,p.updatedAt].every(finite)||!Number.isInteger(p.minutes)||p.minutes<10||p.minutes>90||!p.estimates||typeof p.estimates!=='object'||!p.responses||typeof p.responses!=='object')throw new Error('每日计划不正确');days.add(p.day);
+    for(const field of ['ids','due','completed','skipped','independent'] as const)if(!Array.isArray(p[field])||p[field].length>ids.size||!p[field].every(validId)||new Set(p[field]).size!==p[field].length)throw new Error('每日题目不正确');
+    if([...p.completed,...p.skipped,...p.independent,...p.due].some(id=>!p.ids.includes(id))||p.ids.some(id=>!finite(p.estimates[id])||p.estimates[id]>1800))throw new Error('每日进度不正确');
+    for(const [id,r] of Object.entries(p.responses))if(!p.ids.includes(id)||!r||typeof r.eventId!=='string'||r.eventId.length>100||!finite(r.at)||!Array.isArray(r.answer)||r.answer.length>10||r.answer.some(a=>typeof a!=='string'||a.length>256)||!['correct','wrong','partial','revealed'].includes(r.result)||!['guided','independent'].includes(r.mode)||!finite(r.seconds)||r.seconds>1800||typeof r.revealed!=='boolean'||typeof r.helped!=='boolean')throw new Error('题组作答记录不正确');
+  }
+  return JSON.parse(JSON.stringify(s));
+}
