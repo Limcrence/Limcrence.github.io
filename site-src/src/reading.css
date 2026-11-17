@@ -80,6 +80,19 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .passage-paragraph.scope-paragraph { background: #f3f7ed; box-shadow: -12px 0 #f3f7ed, 12px 0 #f3f7ed; border-radius: 4px; }
 .passage-paragraph.evidence-paragraph { background: #f6f8f1; }
 mark { padding: 2px 0; background: #e4ecbf; color: inherit; box-decoration-break: clone; }
+[data-person-key=A] { --person-color: #e0edd6; }
+[data-person-key=B] { --person-color: #dceaf6; }
+[data-person-key=C] { --person-color: #f0e5ce; }
+[data-person-key=D] { --person-color: #eae0f1; }
+[data-person-key=E] { --person-color: #f4e0d7; }
+[data-person-key=F] { --person-color: #d9eeee; }
+[data-person-key=G] { --person-color: #e9e6ce; }
+mark.person-mention { background: var(--person-color,#e0edd6); padding: 1px 3px; border-radius: 3px; font-weight: 600; }
+.person-locations { align-items: flex-start; padding: 9px; }
+.person-locations > svg { margin-top: 9px; }
+.person-locations > div { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.person-locations button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 6px 8px; font-size: 11px; background: var(--person-color,#e0edd6); color: #4d6245; }
+.person-locations button > span, .person-locations button > small { font-size: 9px; opacity: .65; }
 .question-form { display: flex; flex-direction: column; flex: 1; min-height: 0; margin: 0; }
 .question-scroll { padding: 24px 29px 30px; }
 .question-heading { display: flex; align-items: center; justify-content: space-between; position: relative; gap: 16px; color: #8f9e84; font-size: 11px; margin-bottom: 15px; }
