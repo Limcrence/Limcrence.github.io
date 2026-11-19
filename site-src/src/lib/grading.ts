@@ -17,7 +17,10 @@ export function gradeAnswer(q: Pick<Question, "options" | "correct_answer_raw" |
 }
 export function shortSource(item: {source_type: string; source_name: string; assignment_group: string}) {
   return item.source_type === "周测" ? item.source_name.replace("雅思阅读", "").replace(/\s+/g, " ").trim()
-    : item.source_type === "专项练习" ? "教材 · " + item.assignment_group.replace("Summary 填空和选词填空题", "Summary").replace("细节段落匹配题", "段落匹配") : "考场真题汇总";
+    : item.source_type === "专项练习" ? item.source_name.includes("阅读教材")
+      ? "教材 · " + item.assignment_group.replace("Summary 填空和选词填空题", "Summary").replace("细节段落匹配题", "段落匹配")
+      : item.source_name
+      : "考场真题汇总";
 }
 export function displayNumber(q: {original_number: string; question_number: string}) { return q.original_number || q.question_number; }
 export function originalAnswer(q: Pick<Question, "student_answer" | "student_answer_raw">) {

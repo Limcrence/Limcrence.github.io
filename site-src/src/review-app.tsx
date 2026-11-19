@@ -16,7 +16,7 @@ let questions:Question[]=[];
 let byId=new Map<string,Question>();
 const originalWrong=(q:Question)=>['答错','部分正确'].includes(q.status);
 export function initializeLibrary(value:Library){
-  if(!Array.isArray(value.questions)||value.questions.length!==656||value.exercises.length!==50)throw new Error('题库校验失败');
+  if(!value||![value.questions,value.exercises,value.articles].every(rows=>Array.isArray(rows)&&rows.length>0))throw new Error('题库校验失败');
   library=value;questions=value.questions;byId=new Map(questions.map(q=>[q.id,q]));
 }
 type Session=ReadingSession;
