@@ -9,7 +9,7 @@ import type {Library,Origin,Progress,Question,SaveOperation} from './lib/types';
 import type {SyncIdentity} from './lib/sync-crypto';
 import type {SyncEngine} from './lib/sync-engine';
 import {makeSnapshot,validateSnapshot,type ProgressSnapshot,type ReadingSession} from './lib/snapshot';
-import {STUDY_KEY,createStudy,validateStudy,buildDailyPlan,savePlan,completePlan,recordReview,type StudyState,type AttemptFeedback,type Outcome} from './lib/study';
+import {STUDY_KEY,createStudy,validateStudy,buildDailyPlan,addReviewRound,savePlan,completePlan,recordReview,type DailyPlan,type StudyState,type AttemptFeedback,type Outcome} from './lib/study';
 
 let library:Library;
 let questions:Question[]=[];
@@ -121,13 +121,22 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
   useEffect(()=>{if(!session&&view==='library')requestAnimationFrame(()=>window.scrollTo(0,libraryScroll.current));},[!!session,view]);
 
   const plan=useMemo(()=>ready?buildDailyPlan(library,progress,study,clock):null,[ready,progress,study,clock]);
-  function startDaily(){
-    if(!plan||!ready||loadError)return;
-    const existing=studyRef.current.plans.find(p=>p.day===plan.day),nextPlan={...plan,skipped:[],updatedAt:Date.now()};
+  const extraPlan=useMemo(()=>plan?addReviewRound(library,progress,study,plan):null,[plan,progress,study]);
+  function startDaily(target:DailyPlan|null){
+    if(!target||!ready||loadError)return;
+    const first=target.ids.findIndex(id=>!target.completed.includes(id));
+    if(first<0)return;
+    const nextPlan={...target,skipped:[],updatedAt:Date.now()};
+    const existing=studyRef.current.plans.find(p=>p.day===target.day);
     if(!persistStudy(savePlan(studyRef.current,nextPlan)))return;
-    const first=plan.ids.findIndex(id=>!plan.completed.includes(id));if(first<0)return;
-    if(!existing){let next=progressRef.current;for(const id of plan.ids)next=applyOperation(next,{questionId:id,op:'draft',value:[]});persist(next);}
-    setView('today');setSession({ids:plan.ids,index:first,kind:'daily',day:plan.day});
+    const added=target.ids.filter(id=>!existing?.ids.includes(id));
+    if(added.length){
+      let next=progressRef.current;
+      for(const id of added)next=applyOperation(next,{questionId:id,op:'draft',value:[]});
+      persist(next);
+    }
+    setView('today');
+    setSession({ids:target.ids,index:first,kind:'daily',day:target.day});
   }
   function submitted(rows:{q:Question;feedback:AttemptFeedback}[],day?:string){
     if(loadError)return false;let next=progressRef.current,nextStudy=studyRef.current;
@@ -138,8 +147,11 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
   function reviewed(q:Question,feedback:AttemptFeedback,outcome:Outcome,day?:string){
     if(loadError)return false;
     const actual=feedback.result!=='correct'||feedback.helped?'again':outcome;
-    let next=recordReview(studyRef.current,library,{id:feedback.eventId,questionId:q.id,at:feedback.at,outcome:actual,mode:feedback.mode,seconds:feedback.seconds});
-    if(day)next=completePlan(next,day,q.id);return persistStudy(next);
+    const current=studyRef.current;
+    const next=recordReview(current,library,{id:feedback.eventId,questionId:q.id,at:feedback.at,outcome:actual,mode:feedback.mode,seconds:feedback.seconds});
+    const now=Date.now();
+    if(day)return persistStudy(completePlan(next,day,q.id,false,now));
+    return next===current||persistStudy({...next,updatedAt:Math.max(next.updatedAt,now)});
   }
   function skipDaily(id:string,day:string){return persistStudy(completePlan(studyRef.current,day,id,true));}
   function redoQuestion(id:string,day?:string){
@@ -179,7 +191,7 @@ export default function ReviewApp({lock,syncIdentity}:{lock:()=>void;syncIdentit
     </header>
     {!session&&<nav className="review-nav" aria-label="复习方式"><button aria-current={view==='today'?'page':undefined} onClick={()=>setView('today')}>今日</button><button aria-current={view==='library'?'page':undefined} onClick={()=>setView('library')}>选题</button></nav>}
     {session?<Practice library={library} onRedo={redoQuestion} markRemainder={markRemainder} key={`${session.day||'free'}:${session.ids.join(',')}`} session={session} setSession={setSession} progress={progress} update={update} fontSize={fontSize} changeFont={n=>{setFontSize(n);try{localStorage.setItem('reading-desk-font',String(n));}catch{}}} back={back} ready={ready&&!loadError} dailyPlan={study.plans.find(p=>p.day===session.day)} onSubmitted={submitted} onReviewed={reviewed} onSkip={skipDaily}/>
-      :view==='today'?plan?<DailyDashboard library={library} study={study} plan={plan} ready={ready&&!loadError} onStart={startDaily} onMinutes={minutes=>persistStudy({...studyRef.current,settings:{...studyRef.current.settings,minutes},updatedAt:Date.now()})}/>:<main className="workspace-loading" role="status">正在准备…</main>
+      :view==='today'?plan?<DailyDashboard library={library} study={study} plan={plan} extraPlan={extraPlan} ready={ready&&!loadError} onStart={()=>startDaily(extraPlan||plan)} onMinutes={minutes=>persistStudy({...studyRef.current,settings:{...studyRef.current.settings,minutes},updatedAt:Date.now()})}/>:<main className="workspace-loading" role="status">正在准备…</main>
       :<ExerciseLibrary library={library} progress={progress} filters={filters} onFilters={setFilters} lastSession={lastSession} ready={ready&&!loadError} onPick={start}/>}
     {toast&&<div className="toast" role="status">{toast}</div>}
   </div>;

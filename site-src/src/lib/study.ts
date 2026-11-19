@@ -31,29 +31,111 @@ export function indexQuestions(questions:Question[]):QuestionIndex{
   return {groups,keyById};
 }
 function seeded(value:string){let hash=2166136261;for(const c of value){hash^=c.charCodeAt(0);hash=Math.imul(hash,16777619);}return (hash>>>0)/4294967296;}
-function estimate(q:Question,study:StudyState){const recent=study.events.filter(e=>e.part===questionPart(q)&&!e.learningCheck&&e.seconds>=20).slice(-12).map(e=>e.seconds).sort((a,b)=>a-b);const base=recent.length>=3?recent[Math.floor(recent.length/2)]:({'1':150,'2':210,'3':270} as Record<string,number>)[questionPart(q)]||210;return Math.max(90,Math.min(420,base+(q.points>1?45:0)));}
-export function buildDailyPlan(library:Library,progress:Progress,study:StudyState,now=Date.now()):DailyPlan{
-  const day=studyDay(now,study.settings.timeZone),existing=study.plans.find(p=>p.day===day);if(existing)return existing;
-  const index=indexQuestions(library.questions),weekStart=shiftDay(day,-6),spent:Record<string,number>={'1':0,'2':0,'3':0,'':0};
-  for(const e of study.events)if(e.day>=weekStart&&!e.learningCheck)spent[e.part]=(spent[e.part]||0)+e.seconds;
-  const candidates=[...index.groups].flatMap(([key,rows])=>{
-    const q=[...rows].sort((a,b)=>Number(!!b.review)-Number(!!a.review)||Number(progress[b.id]?.origin==='serious')-Number(progress[a.id]?.origin==='serious'))[0];
-    const card=study.cards[key];if(card&&card.dueDay>day)return [];
-    const relevant=rows.some(r=>['答错','部分正确','未作答'].includes(r.status)||progress[r.id]?.origin==='rushed');if(!card&&!relevant)return [];
-    const overdue=card?Math.max(0,(Date.parse(day)-Date.parse(card.dueDay))/86400000):0;
-    const newWrong=rows.some(r=>['答错','部分正确'].includes(r.status)&&progress[r.id]?.origin!=='rushed');
-    return [{key,q,due:!!card,seconds:estimate(q,study),score:card?1000+Math.min(30,overdue)*12+(card.lastOutcome==='again'?130:0):newWrong?(progress[q.id]?.state==='mastered'?45:90):20}];
-  });
-  const selected:typeof candidates=[],articles=new Set<string>(),partTime:Record<string,number>={'1':0,'2':0,'3':0,'':0};let used=0,newTime=0;
-  const budget=Math.max(300,(study.settings.minutes-3)*60),hasDue=candidates.some(c=>c.due);
-  while(candidates.length){
-    const total=Object.values(spent).reduce((a,b)=>a+b,0)+used+1;
-    candidates.sort((a,b)=>{const score=(c:typeof a)=>c.score+((targets[questionPart(c.q)]||0)-(spent[questionPart(c.q)]+partTime[questionPart(c.q)])/total)*90+(articles.has(c.q.article_id)?18:0)+seeded(day+c.key)*25;return score(b)-score(a);});
-    const pick=candidates.findIndex(c=>{const cost=c.seconds+(articles.has(c.q.article_id)?0:75);return used+cost<=budget&&(articles.has(c.q.article_id)||articles.size<3)&&(!hasDue||c.due||newTime+c.seconds<=study.settings.minutes*60*.3)&&(questionPart(c.q)!=='3'||partTime['3']+c.seconds<=study.settings.minutes*60*.5||!candidates.some(x=>questionPart(x.q)!=='3'));});
-    if(pick<0)break;const [c]=candidates.splice(pick,1);used+=c.seconds+(articles.has(c.q.article_id)?0:75);articles.add(c.q.article_id);selected.push(c);partTime[questionPart(c.q)]+=c.seconds;if(!c.due)newTime+=c.seconds;
+export const PASSAGE_START_SECONDS=40;
+export const EXTRA_REVIEW_MINUTES=10;
+
+function baselineSeconds(q:Question){
+  const byPart:Record<string,number>={'1':80,'2':105,'3':130,'':105};
+  return byPart[questionPart(q)]+(q.points>1?25:0);
+}
+
+function median(values:number[]){
+  const ordered=[...values].sort((a,b)=>a-b);
+  return (ordered[Math.floor((ordered.length-1)/2)]+ordered[Math.floor(ordered.length/2)])/2;
+}
+
+function estimatePace(questions:Map<string,Question>,events:ReviewEvent[]){
+  const samples=events.filter(event=>!event.learningCheck&&event.seconds>=15&&questions.has(event.questionId)).slice(-36).map(event=>({
+    part:event.part,
+    ratio:event.seconds/baselineSeconds(questions.get(event.questionId)!),
+  }));
+  const overall=samples.length>=3?median(samples.map(sample=>sample.ratio)):1;
+  const pace:Record<string,number>={};
+  for(const part of Object.keys(targets)){
+    const ratios=samples.filter(sample=>sample.part===part).slice(-12).map(sample=>sample.ratio);
+    pace[part]=ratios.length>=3?median(ratios):overall;
   }
-  const ordered=[...articles].flatMap(article=>selected.filter(c=>c.q.article_id===article).sort((a,b)=>library.questions.indexOf(a.q)-library.questions.indexOf(b.q)));
-  return {day,ids:ordered.map(c=>c.q.id),due:ordered.filter(c=>c.due).map(c=>c.q.id),completed:[],skipped:[],responses:{},independent:ordered.filter(c=>{const card=study.cards[c.key];return isParagraphMatch(c.q)||!!card&&card.guidedPasses>=2&&card.lastOutcome!=='again';}).map(c=>c.q.id),estimates:Object.fromEntries(ordered.map(c=>[c.q.id,c.seconds])),minutes:study.settings.minutes,createdAt:now,updatedAt:now};
+  return pace;
+}
+
+type DailySelection=Pick<DailyPlan,'ids'|'due'|'independent'|'estimates'>;
+function selectDailyQuestions(library:Library,progress:Progress,study:StudyState,day:string,budget:number,excluded:string[]=[]):DailySelection{
+  const index=indexQuestions(library.questions);
+  const excludedKeys=new Set(excluded.map(id=>index.keyById.get(id)));
+  const byId=new Map(library.questions.map(q=>[q.id,q]));
+  const order=new Map(library.questions.map((q,i)=>[q.id,i]));
+  const pace=estimatePace(byId,study.events);
+  const weekStart=shiftDay(day,-6);
+  const spent:Record<string,number>={'1':0,'2':0,'3':0,'':0};
+  for(const event of study.events){
+    if(event.day>=weekStart&&event.day<=day&&!event.learningCheck)spent[event.part]+=event.seconds;
+  }
+  const weekSeconds=Object.values(spent).reduce((sum,seconds)=>sum+seconds,0);
+  const candidates=[...index.groups].flatMap(([key,rows])=>{
+    if(excludedKeys.has(key))return [];
+    const card=study.cards[key];
+    if(card&&card.dueDay>day)return [];
+    const relevant=rows.some(row=>['答错','部分正确','未作答'].includes(row.status)||progress[row.id]?.origin==='rushed');
+    if(!card&&!relevant)return [];
+    const q=[...rows].sort((a,b)=>Number(!!b.review)-Number(!!a.review)||Number(progress[b.id]?.origin==='serious')-Number(progress[a.id]?.origin==='serious'))[0];
+    const part=questionPart(q);
+    const seconds=Math.round(Math.max(35,Math.min(420,baselineSeconds(q)*pace[part])));
+    const overdue=card?Math.max(0,(Date.parse(day)-Date.parse(card.dueDay))/86400000):0;
+    const newWrong=rows.some(row=>['答错','部分正确'].includes(row.status)&&progress[row.id]?.origin!=='rushed');
+    const priority=card?1000+Math.min(30,overdue)*12+(card.lastOutcome==='again'?130:0):newWrong?(progress[q.id]?.state==='mastered'?45:90):20;
+    return [{q,part,seconds,card,priority:priority+seeded(day+key)*25}];
+  });
+  const preferredArticles=Math.max(2,Math.ceil(budget/720));
+  const selected:typeof candidates=[];
+  const articles=new Set<string>();
+  const partTime:Record<string,number>={'1':0,'2':0,'3':0,'':0};
+  let used=0;
+  while(candidates.length){
+    const cost=(candidate:typeof candidates[number])=>candidate.seconds+(articles.has(candidate.q.article_id)?0:PASSAGE_START_SECONDS);
+    const rank=(candidate:typeof candidates[number])=>{
+      const partShare=(spent[candidate.part]+partTime[candidate.part])/(weekSeconds+used+1);
+      const familiarArticle=articles.has(candidate.q.article_id);
+      const articlePreference=familiarArticle?22:articles.size>=preferredArticles?-60:0;
+      return candidate.priority+(targets[candidate.part]-partShare)*120+articlePreference;
+    };
+    candidates.sort((a,b)=>rank(b)-rank(a));
+    const pick=candidates.findIndex(candidate=>used+cost(candidate)<=budget);
+    if(pick<0)break;
+    const [candidate]=candidates.splice(pick,1);
+    used+=cost(candidate);
+    articles.add(candidate.q.article_id);
+    selected.push(candidate);
+    partTime[candidate.part]+=candidate.seconds;
+  }
+  const ordered=[...articles].flatMap(article=>selected.filter(candidate=>candidate.q.article_id===article)
+    .sort((a,b)=>order.get(a.q.id)!-order.get(b.q.id)!));
+  return {
+    ids:ordered.map(candidate=>candidate.q.id),
+    due:ordered.filter(candidate=>candidate.card).map(candidate=>candidate.q.id),
+    independent:ordered.filter(({q,card})=>isParagraphMatch(q)||!!card&&card.guidedPasses>=2&&card.lastOutcome!=='again').map(candidate=>candidate.q.id),
+    estimates:Object.fromEntries(ordered.map(candidate=>[candidate.q.id,candidate.seconds])),
+  };
+}
+
+export function buildDailyPlan(library:Library,progress:Progress,study:StudyState,now=Date.now()):DailyPlan{
+  const day=studyDay(now,study.settings.timeZone);
+  const existing=study.plans.find(plan=>plan.day===day);
+  if(existing)return existing;
+  const selection=selectDailyQuestions(library,progress,study,day,study.settings.minutes*60);
+  return {day,...selection,completed:[],skipped:[],responses:{},minutes:study.settings.minutes,createdAt:now,updatedAt:now};
+}
+
+export function addReviewRound(library:Library,progress:Progress,study:StudyState,plan:DailyPlan):DailyPlan|null{
+  if(!plan.ids.length||plan.ids.some(id=>!plan.completed.includes(id)))return null;
+  const extra=selectDailyQuestions(library,progress,study,plan.day,EXTRA_REVIEW_MINUTES*60,plan.ids);
+  if(!extra.ids.length)return null;
+  return {
+    ...plan,
+    ids:[...plan.ids,...extra.ids],
+    due:[...plan.due,...extra.due],
+    independent:[...plan.independent,...extra.independent],
+    estimates:{...plan.estimates,...extra.estimates},
+  };
 }
 export function savePlan(study:StudyState,plan:DailyPlan):StudyState{return {...study,plans:[...study.plans.filter(p=>p.day!==plan.day),plan].slice(-60),updatedAt:plan.updatedAt};}
 export function completePlan(study:StudyState,day:string,id:string,skip=false,now=Date.now()):StudyState{
@@ -61,7 +143,12 @@ export function completePlan(study:StudyState,day:string,id:string,skip=false,no
   return savePlan(study,{...plan,completed:skip?plan.completed:[...new Set([...plan.completed,id])],skipped:skip?[...new Set([...plan.skipped,id])]:plan.skipped.filter(x=>x!==id),updatedAt:now});
 }
 export function recordReview(study:StudyState,library:Library,input:Omit<ReviewEvent,'day'|'part'|'key'|'learningCheck'>):StudyState{
-  if(study.events.some(e=>e.id===input.id))return study;
+  const existing=study.events.find(event=>event.id===input.id);
+  if(existing){
+    // A wrong answer is scheduled at submission. Finishing the explanation only updates its elapsed time.
+    if(existing.questionId!==input.questionId||input.seconds<=existing.seconds)return study;
+    return {...study,events:study.events.map(event=>event===existing?{...event,seconds:Math.min(1800,input.seconds)}:event),updatedAt:Math.max(study.updatedAt,input.at)};
+  }
   const q=library.questions.find(q=>q.id===input.questionId);if(!q)return study;
   const key=indexQuestions(library.questions).keyById.get(q.id)!,old=study.cards[key],day=studyDay(input.at,study.settings.timeZone),sameDay=old?.lastDay===day;
   const event:ReviewEvent={...input,seconds:Math.max(0,Math.min(1800,input.seconds)),key,day,part:questionPart(q),learningCheck:sameDay};

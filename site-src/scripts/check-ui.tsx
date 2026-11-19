@@ -52,7 +52,21 @@ try{
     if(!document.querySelector('.answer-feedback'))await click([...document.querySelectorAll('button')].find(b=>['看解析','看本组解析'].includes(b.textContent.trim())));
     await click(button('继续'));
   }
-  assert.equal(savedStudy().plans[0].completed.length,originalIds.length);assert.ok(button('已完成')?.disabled);
+  assert.equal(savedStudy().plans[0].completed.length,originalIds.length);
+  assert.ok(document.querySelector('select[aria-label="每日复习时长"] option[value="60"]'));
+  const extraButton=[...document.querySelectorAll('button')].find(b=>b.textContent.startsWith('再练一轮'));
+  await click(extraButton);
+  const extendedPlan=savedStudy().plans[0],extension=extendedPlan.ids.slice(originalIds.length);
+  assert.ok(extension.length);
+  assert.deepEqual(extendedPlan.completed,originalIds);
+  assert.equal(currentQuestion().id,extension[0]);
+  assert.equal(new Set(extendedPlan.ids).size,extendedPlan.ids.length);
+  await unmount();await mount();assert.equal(currentQuestion().id,extension[0]);
+  for(let i=0;i<30&&!document.querySelector('.today-card');i++){
+    if(!document.querySelector('.answer-feedback'))await click([...document.querySelectorAll('button')].find(b=>['看解析','看本组解析'].includes(b.textContent.trim())));
+    await click(button('继续'));
+  }
+  assert.equal(savedStudy().plans[0].completed.length,extendedPlan.ids.length);
   validateStudy(savedStudy(),ids);assert.equal(position(),null);
   assert.deepEqual([...document.querySelectorAll('.review-nav > button')].map(b=>b.textContent),['今日','选题']);
   await click(button('选题'));assert.equal(button('开始复习'),undefined);assert.equal(button('自由练习'),undefined);

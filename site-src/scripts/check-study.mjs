@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import {createStudy,buildDailyPlan,indexQuestions,questionPart,recordReview,savePlan,completePlan,validateStudy,studyDay,shiftDay,isParagraphMatch,paragraphHints} from '../src/lib/study.ts';
+import {createStudy,buildDailyPlan,addReviewRound,PASSAGE_START_SECONDS,EXTRA_REVIEW_MINUTES,indexQuestions,questionPart,recordReview,savePlan,completePlan,validateStudy,studyDay,shiftDay,isParagraphMatch,paragraphHints} from '../src/lib/study.ts';
 import {makeSnapshot,validateSnapshot} from '../src/lib/snapshot.ts';
 import {applyOperation,freshRecord} from '../src/lib/progress.ts';
 const library=JSON.parse(await fs.readFile(new URL('../../reading-practice-web/app/data/library.json',import.meta.url),'utf8'));
-const ids=new Set(library.questions.map(q=>q.id)),index=indexQuestions(library.questions),now=Date.parse('2026-11-16T12:00:00Z');
+const byId=new Map(library.questions.map(q=>[q.id,q]));
+const ids=new Set(byId.keys()),index=indexQuestions(library.questions),now=Date.parse('2026-11-16T12:00:00Z');
+const duration=(plan,ids=plan.ids)=>ids.reduce((sum,id)=>sum+plan.estimates[id],0)+new Set(ids.map(id=>byId.get(id).article_id)).size*PASSAGE_START_SECONDS;
 let study=createStudy('Asia/Tokyo');const day=studyDay(now,study.settings.timeZone);
-const plan=buildDailyPlan(library,{},study,now);assert.ok(plan.ids.length>=4&&plan.ids.length<=12);
-assert.ok(new Set(plan.ids.map(id=>library.questions.find(q=>q.id===id).article_id)).size<=3);
+const plan=buildDailyPlan(library,{},study,now);assert.ok(plan.ids.length>=4);
 assert.equal(new Set(plan.ids.map(id=>index.keyById.get(id))).size,plan.ids.length);
-const passageCount=new Set(plan.ids.map(id=>library.questions.find(q=>q.id===id).article_id)).size;
-assert.ok(Object.values(plan.estimates).reduce((a,b)=>a+b,0)+passageCount*75<=(plan.minutes-3)*60);
+const passageCount=new Set(plan.ids.map(id=>byId.get(id).article_id)).size;
+assert.ok(duration(plan)>=(plan.minutes-3)*60&&duration(plan)<=plan.minutes*60);
 assert.deepEqual(plan.ids,buildDailyPlan(library,{},study,now+60000).ids);
 assert.equal(questionPart(library.questions.find(q=>q.assignment_group==='Passage 1')), '1');
 study=savePlan(study,plan);assert.deepEqual(buildDailyPlan(library,{},study,now+30000),plan);
@@ -18,6 +19,10 @@ const q=library.questions.find(q=>q.id===plan.ids[0]),key=index.keyById.get(q.id
 const event={id:crypto.randomUUID(),questionId:q.id,at:now,outcome:'again',mode:'guided',seconds:90};
 study=recordReview(study,library,event);assert.equal(study.cards[key].dueDay,shiftDay(day,1));
 assert.equal(recordReview(study,library,event),study);
+const withExplanationTime=recordReview(study,library,{...event,seconds:120});
+assert.equal(withExplanationTime.events.length,1);
+assert.equal(withExplanationTime.events[0].seconds,120);
+assert.deepEqual(withExplanationTime.cards,study.cards);
 const stability=study.cards[key].memory.stability;
 study=recordReview(study,library,{...event,id:crypto.randomUUID(),at:now+600000,outcome:'good'});
 assert.equal(study.cards[key].memory.stability,stability);assert.equal(study.cards[key].dueDay,shiftDay(day,1));assert.equal(study.events.at(-1).learningCheck,true);
@@ -37,5 +42,30 @@ const invalid=structuredClone(study);invalid.cards[key].memory.stability=NaN;ass
 const invalidPlan=structuredClone(study);invalidPlan.plans[0].ids.push(plan.ids[0]);assert.throws(()=>validateStudy(invalidPlan,ids));
 const frozen=structuredClone(study);frozen.settings.minutes=45;assert.deepEqual(buildDailyPlan(library,{},frozen,now).ids,plan.ids);
 const tomorrow=buildDailyPlan(library,{},createStudy('Asia/Tokyo'),now+86400000);assert.notDeepEqual(tomorrow.ids,plan.ids);
+
+// A small due queue must not leave most of the 45 minutes empty.
+const longStudy={...createStudy('Asia/Tokyo'),settings:{minutes:45,timeZone:'Asia/Tokyo'},cards:{[key]:{...study.cards[key],dueDay:day}}};
+const longPlan=buildDailyPlan(library,{},longStudy,now);
+assert.equal(longPlan.due.length,1);
+assert.ok(duration(longPlan)>=42*60&&duration(longPlan)<=45*60);
+const fasterEvents=library.questions.filter(q=>q.status==='答错').slice(0,12).map((q,i)=>({
+  id:'pace-'+i,questionId:q.id,key:index.keyById.get(q.id),day,at:now-60000,outcome:'good',mode:'guided',seconds:40,part:questionPart(q),learningCheck:false,
+}));
+const fasterStudy={...longStudy,events:fasterEvents};
+const fasterPlan=buildDailyPlan(library,{},fasterStudy,now);
+assert.ok(fasterPlan.ids.length>longPlan.ids.length);
+assert.ok(duration(fasterPlan)>=43*60&&duration(fasterPlan)<=45*60);
+const hourPlan=buildDailyPlan(library,{},{...fasterStudy,settings:{...fasterStudy.settings,minutes:60}},now);
+assert.ok(duration(hourPlan)>=57*60&&duration(hourPlan)<=60*60);
+assert.ok(hourPlan.ids.length>fasterPlan.ids.length);
+assert.equal(addReviewRound(library,{},longStudy,longPlan),null);
+const finished={...longPlan,completed:longPlan.ids};
+const extended=addReviewRound(library,{},longStudy,finished);
+assert.ok(extended);
+const additional=extended.ids.slice(finished.ids.length);
+assert.ok(additional.length>0&&duration(extended,additional)<=EXTRA_REVIEW_MINUTES*60);
+assert.deepEqual(extended.completed,finished.ids);
+assert.equal(new Set(extended.ids.map(id=>index.keyById.get(id))).size,extended.ids.length);
+validateStudy(savePlan(longStudy,extended),ids);
 const matching=library.questions.filter(q=>q.review&&isParagraphMatch(q));assert.equal(matching.length,19);assert.ok(matching.every(q=>paragraphHints(q,library.articles.find(a=>a.id===q.article_id)).length>0));
-console.log(JSON.stringify({dailyQuestions:plan.ids.length,articles:passageCount,estimatedMinutes:Math.ceil((Object.values(plan.estimates).reduce((a,b)=>a+b,0)+passageCount*75)/60),stableDailyPlan:true,deduplicated:true,withinTimeBudget:true,failureDueTomorrow:true,sameDayCannotInflateMemory:true,noteDoesNotChangeSchedule:true,skipIsNotFailure:true,legacyMigrationPreservesNotes:true,fullSnapshotRoundtrip:true,matchingQuestionsProtected:matching.length}));
+console.log(JSON.stringify({dailyQuestions:plan.ids.length,articles:passageCount,estimatedMinutes:Math.ceil(duration(plan)/60),questionsAt45Minutes:longPlan.ids.length,fasterQuestionsAt45Minutes:fasterPlan.ids.length,fasterQuestionsAt60Minutes:hourPlan.ids.length,extraQuestions:additional.length,stableDailyPlan:true,deduplicated:true,withinTimeBudget:true,failureDueTomorrow:true,sameDayCannotInflateMemory:true,noteDoesNotChangeSchedule:true,skipIsNotFailure:true,legacyMigrationPreservesNotes:true,fullSnapshotRoundtrip:true,matchingQuestionsProtected:matching.length}));

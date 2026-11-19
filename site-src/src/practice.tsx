@@ -26,9 +26,16 @@ export function Practice({library,session,setSession,progress,update,fontSize,ch
   const feedbacks={...localFeedback,...dailyPlan?.responses},feedback=feedbacks[q.id],shown=!!feedback;
   const passageRef=useRef<HTMLDivElement>(null),questionRef=useRef<HTMLDivElement>(null),formRef=useRef<HTMLFormElement>(null),queueRef=useRef<HTMLDialogElement>(null);
   const seconds=useRef<Record<string,number>>({});
+  const explanationSeconds=useRef<Record<string,number>>({});
   const nameCursors=useRef<Record<string,number>>({});
   const personMatch=isPersonMatch(q),people=useMemo(()=>personLocations(q,article),[q.id,article]);
-  useEffect(()=>{const timer=setInterval(()=>{if(document.visibilityState==='visible'&&!shown)seconds.current[q.id]=(seconds.current[q.id]||0)+1;},1000);return()=>clearInterval(timer);},[q.id,shown]);
+  useEffect(()=>{
+    const activeSeconds=shown?explanationSeconds:seconds;
+    const timer=setInterval(()=>{
+      if(document.visibilityState==='visible')activeSeconds.current[q.id]=(activeSeconds.current[q.id]||0)+1;
+    },1000);
+    return()=>clearInterval(timer);
+  },[q.id,shown]);
   const labels=paragraphHints(q,article),paragraphMatch=isParagraphMatch(q),checkpoint=!!dailyPlan?.independent.includes(q.id),independent=paragraphMatch||checkpoint||!labels.length;
   const scopeVisible=!personMatch&&(!independent||scopes.includes(q.id))&&labels.length>0;
   const needles=q.review?[...q.review.evidence.map(e=>e.text),...q.review.anchors]:[];
@@ -55,7 +62,13 @@ export function Practice({library,session,setSession,progress,update,fontSize,ch
     if(session.kind==='daily'&&offset>0){const excluded=new Set([...(dailyPlan?.completed||[]),...(dailyPlan?.skipped||[]),...(finished||skipped?[q.id]:[])]);const after=session.ids.findIndex((id,i)=>i>session.index&&!excluded.has(id));const earlier=session.ids.findIndex(id=>!excluded.has(id)&&id!==q.id);const next=after>=0?after:earlier;if(next<0){back(true);return;}setSession({...session,index:next});}
     else{const next=session.index+offset;if(next>=session.ids.length){back(true);return;}if(next>=0)setSession({...session,index:next});}
   }
-  function finish(outcome:Outcome='good'){if(!feedback||!ready)return;if(onReviewed(q,feedback,outcome,session.day))move(1,true);}
+  function feedbackWithTime(value:AttemptFeedback){
+    return {...value,seconds:Math.min(1800,value.seconds+(explanationSeconds.current[q.id]||0))};
+  }
+  function finish(outcome:Outcome='good'){
+    if(!feedback||!ready)return;
+    if(onReviewed(q,feedbackWithTime(feedback),outcome,session.day))move(1,true);
+  }
   function skip(){if(!ready)return;if(shown){finish(feedback.result==='correct'?'hard':'again');return;}if(session.day&&!onSkip(q.id,session.day))return;move(1,false,true);}
   function submit(direct=false){
     if(!ready||shown||!direct&&!hasAnswer)return;
@@ -68,7 +81,15 @@ export function Practice({library,session,setSession,progress,update,fontSize,ch
   }
   useEffect(()=>{function keyboard(e:KeyboardEvent){const target=e.target as HTMLElement;if(target.closest('input,textarea,select,button,summary,[contenteditable=true],dialog')||e.ctrlKey||e.metaKey||e.altKey||queueOpen)return;if(e.key==='Enter'){e.preventDefault();if(shown)finish();else formRef.current?.requestSubmit();}if(e.key==='ArrowRight'&&shown){e.preventDefault();finish();}if(e.key==='ArrowLeft'){e.preventDefault();move(-1);}}document.addEventListener('keydown',keyboard);return()=>document.removeEventListener('keydown',keyboard);});
   function choose(key:string){if(shown)return;update({questionId:q.id,op:'draft',value:multi?(answer.includes(key)?answer.filter(v=>v!==key):answer.length<q.points?[...answer,key]:answer):[key]});}
-  function redo(){if(feedback&&!onReviewed(q,feedback,feedback.result==='correct'?'hard':'again',session.day))return;if(!onRedo(q.id,session.day))return;setLocalFeedback(old=>{const next={...old};delete next[q.id];return next;});update({questionId:q.id,op:'draft',value:[]});seconds.current[q.id]=0;questionRef.current?.scrollTo({top:0,behavior:'smooth'});}
+  function redo(){
+    if(feedback&&!onReviewed(q,feedbackWithTime(feedback),feedback.result==='correct'?'hard':'again',session.day))return;
+    if(!onRedo(q.id,session.day))return;
+    setLocalFeedback(old=>{const next={...old};delete next[q.id];return next;});
+    update({questionId:q.id,op:'draft',value:[]});
+    seconds.current[q.id]=0;
+    explanationSeconds.current[q.id]=0;
+    questionRef.current?.scrollTo({top:0,behavior:'smooth'});
+  }
   const mastery=record.state==='mastered';
   const Passage=<section className="passage-pane">
     <div className="pane-toolbar"><span>原文</span><div className="font-controls"><button type="button" aria-label="缩小原文字号" disabled={fontSize<=15} onClick={()=>changeFont(fontSize-1)}>A−</button><button type="button" aria-label="放大原文字号" disabled={fontSize>=22} onClick={()=>changeFont(fontSize+1)}>A+</button></div></div>
